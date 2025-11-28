@@ -1,8 +1,16 @@
-# mysqltuner_mcp
+# MySQL Performance Tuning MCP
 
 A Model Context Protocol (MCP) server for MySQL performance tuning and analysis.
 
+[![PyPI - Version](https://img.shields.io/pypi/v/mysqltuner-mcp)](https://pypi.org/project/mysqltuner-mcp/)
+[![PyPI - Downloads](https://img.shields.io/pypi/dm/mysqltuner-mcp)](https://pypi.org/project/mysqltuner-mcp/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Pepy Total Downloads](https://img.shields.io/pepy/dt/mysqltuner-mcp )](https://pypi.org/project/mysqltuner-mcp/)
+[![Docker Pulls](https://img.shields.io/docker/pulls/dog830228/mysqltuner_mcp)](https://hub.docker.com/r/dog830228/mysqltuner_mcp)
+
+<a href="https://glama.ai/mcp/servers/@isdaniel/MySQL-Performance-Tuner-Mcp">
+  <img width="380" height="200" src="https://glama.ai/mcp/servers/@isdaniel/MySQL-Performance-Tuner-Mcp/badge" />
+</a>
 
 ## Overview
 
