@@ -21,11 +21,15 @@ from typing import Any
 
 from mcp.server import Server
 from mcp.types import (
+    CompleteResult,
+    Completion,
     GetPromptResult,
     Prompt,
     PromptArgument,
     PromptMessage,
+    PromptReference,
     Resource,
+    ResourceTemplateReference,
     TextContent,
     Tool,
 )
@@ -208,6 +212,73 @@ class MySQLTunerServer:
         async def read_resource(uri: str) -> str:
             """Read a resource by URI."""
             return await self._read_resource(uri)
+
+        @self.server.completion()
+        async def handle_completion(
+            ref: PromptReference | ResourceTemplateReference,
+            argument: dict[str, str],
+            context: dict[str, str] | None = None
+        ) -> CompleteResult:
+            """Handle completion requests for prompts and resource templates."""
+            return await self._get_completions(ref, argument, context)
+
+    async def _get_completions(
+        self,
+        ref: PromptReference | ResourceTemplateReference,
+        argument: dict[str, str],
+        context: dict[str, str] | None = None
+    ) -> CompleteResult:
+        """
+        Provide completions for prompt arguments.
+
+        Args:
+            ref: Reference to prompt or resource template
+            argument: The argument being completed (name and current value)
+            context: Optional additional context
+
+        Returns:
+            CompleteResult with suggested completions
+        """
+        completions: list[str] = []
+
+        # Handle prompt completions
+        if isinstance(ref, PromptReference):
+            prompt_name = ref.name
+            arg_name = argument.get("name", "")
+            arg_value = argument.get("value", "")
+
+            if prompt_name == "optimize_slow_query":
+                if arg_name == "table_name":
+                    # Suggest common table-related completions
+                    completions = ["users", "orders", "products", "sessions", "logs"]
+                    if arg_value:
+                        completions = [c for c in completions if c.startswith(arg_value.lower())]
+
+            elif prompt_name == "health_check":
+                if arg_name == "focus_area":
+                    completions = ["memory", "connections", "queries", "all", "innodb", "replication"]
+                    if arg_value:
+                        completions = [c for c in completions if c.startswith(arg_value.lower())]
+
+            elif prompt_name == "index_review":
+                if arg_name == "schema_name":
+                    # Could potentially query for actual schemas, for now provide common suggestions
+                    completions = ["public", "app", "analytics", "logs"]
+                    if arg_value:
+                        completions = [c for c in completions if c.startswith(arg_value.lower())]
+
+        # Handle resource template completions (if any resource templates are added in the future)
+        elif isinstance(ref, ResourceTemplateReference):
+            # Currently no resource templates defined, return empty
+            pass
+
+        return CompleteResult(
+            completion=Completion(
+                values=completions[:100],  # Limit to 100 suggestions
+                total=len(completions),
+                hasMore=len(completions) > 100
+            )
+        )
 
     async def initialize(self) -> None:
         """Initialize database connection and tools."""

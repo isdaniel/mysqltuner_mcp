@@ -6,6 +6,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 import os
 
+from mcp.types import PromptReference, ResourceTemplateReference
 from mysqltuner_mcp.server import ServerConfig, MySQLTunerServer
 
 
@@ -227,3 +228,92 @@ class TestMySQLTunerServer:
         await server.shutdown()
 
         mock_pool.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_get_completions_prompt_health_check(self):
+        """Test completion for health_check prompt focus_area argument."""
+        config = ServerConfig(mysql_uri=TEST_MYSQL_URI)
+
+        server = MySQLTunerServer(config)
+        ref = PromptReference(type="ref/prompt", name="health_check")
+        argument = {"name": "focus_area", "value": ""}
+
+        result = await server._get_completions(ref, argument)
+
+        assert result.completion is not None
+        assert "memory" in result.completion.values
+        assert "connections" in result.completion.values
+        assert "queries" in result.completion.values
+
+    @pytest.mark.asyncio
+    async def test_get_completions_prompt_health_check_partial(self):
+        """Test completion with partial input filters results."""
+        config = ServerConfig(mysql_uri=TEST_MYSQL_URI)
+
+        server = MySQLTunerServer(config)
+        ref = PromptReference(type="ref/prompt", name="health_check")
+        argument = {"name": "focus_area", "value": "mem"}
+
+        result = await server._get_completions(ref, argument)
+
+        assert result.completion is not None
+        assert "memory" in result.completion.values
+        # Should not include values that don't start with "mem"
+        assert "connections" not in result.completion.values
+
+    @pytest.mark.asyncio
+    async def test_get_completions_prompt_optimize_slow_query(self):
+        """Test completion for optimize_slow_query prompt table_name argument."""
+        config = ServerConfig(mysql_uri=TEST_MYSQL_URI)
+
+        server = MySQLTunerServer(config)
+        ref = PromptReference(type="ref/prompt", name="optimize_slow_query")
+        argument = {"name": "table_name", "value": ""}
+
+        result = await server._get_completions(ref, argument)
+
+        assert result.completion is not None
+        assert "users" in result.completion.values
+        assert "orders" in result.completion.values
+
+    @pytest.mark.asyncio
+    async def test_get_completions_prompt_index_review(self):
+        """Test completion for index_review prompt schema_name argument."""
+        config = ServerConfig(mysql_uri=TEST_MYSQL_URI)
+
+        server = MySQLTunerServer(config)
+        ref = PromptReference(type="ref/prompt", name="index_review")
+        argument = {"name": "schema_name", "value": ""}
+
+        result = await server._get_completions(ref, argument)
+
+        assert result.completion is not None
+        assert "public" in result.completion.values
+
+    @pytest.mark.asyncio
+    async def test_get_completions_resource_template_empty(self):
+        """Test completion for resource template returns empty results."""
+        config = ServerConfig(mysql_uri=TEST_MYSQL_URI)
+
+        server = MySQLTunerServer(config)
+        ref = ResourceTemplateReference(type="ref/resource", uri="mysql://tuner/{template}")
+        argument = {"name": "template", "value": ""}
+
+        result = await server._get_completions(ref, argument)
+
+        assert result.completion is not None
+        assert len(result.completion.values) == 0
+
+    @pytest.mark.asyncio
+    async def test_get_completions_unknown_prompt(self):
+        """Test completion for unknown prompt returns empty results."""
+        config = ServerConfig(mysql_uri=TEST_MYSQL_URI)
+
+        server = MySQLTunerServer(config)
+        ref = PromptReference(type="ref/prompt", name="unknown_prompt")
+        argument = {"name": "arg", "value": ""}
+
+        result = await server._get_completions(ref, argument)
+
+        assert result.completion is not None
+        assert len(result.completion.values) == 0

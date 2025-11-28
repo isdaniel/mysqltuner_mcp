@@ -30,13 +30,16 @@ class StorageEngineAnalysisToolHandler(ToolHandler):
     destructive_hint = False
     idempotent_hint = True
     open_world_hint = False
-    description = """Analyze storage engine usage and statistics.
+    description = """Analyze storage engine usage and statistics for user tables.
 
 Provides:
 - List of available engines and their status
 - Table count and size by engine
 - Engine-specific metrics (InnoDB, MyISAM, MEMORY, etc.)
 - Recommendations for engine optimization
+
+Note: This tool only analyzes user/custom tables and excludes MySQL system
+tables (mysql, information_schema, performance_schema, sys) by default.
 
 Based on MySQLTuner's engine analysis patterns."""
 
@@ -442,12 +445,15 @@ class FragmentedTablesToolHandler(ToolHandler):
     destructive_hint = False
     idempotent_hint = True
     open_world_hint = False
-    description = """Find tables with significant fragmentation.
+    description = """Find user tables with significant fragmentation.
 
 Fragmentation occurs when:
 - Data is deleted from tables
 - Tables are frequently updated
 - VARCHAR/TEXT columns are modified
+
+Note: This tool only analyzes user/custom tables and excludes MySQL system
+tables (mysql, information_schema, performance_schema, sys) by default.
 
 High fragmentation wastes disk space and can slow queries."""
 
@@ -601,6 +607,9 @@ Checks:
 - Current value vs maximum value for column type
 - Usage percentage
 - Tables approaching overflow
+
+Note: This tool only analyzes user/custom tables and excludes MySQL system
+tables (mysql, information_schema, performance_schema, sys) by default.
 
 Based on MySQLTuner's auto-increment analysis."""
 

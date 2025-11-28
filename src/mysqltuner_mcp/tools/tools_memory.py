@@ -623,13 +623,16 @@ class TableMemoryUsageToolHandler(ToolHandler):
     destructive_hint = False
     idempotent_hint = True
     open_world_hint = False
-    description = """Analyze memory usage for tables and caches.
+    description = """Analyze memory usage for user tables and caches.
 
 Shows:
 - Table cache usage and hit rates
 - Table definition cache efficiency
 - Open tables vs table_open_cache
 - InnoDB buffer pool by table
+
+Note: Buffer pool breakdown by table only shows user/custom tables
+and excludes MySQL system tables (mysql, information_schema, performance_schema, sys).
 
 Helps optimize table caching parameters."""
 
@@ -724,6 +727,9 @@ Helps optimize table caching parameters."""
                 )
             }
 
+            # Define system schemas to exclude from analysis
+            system_schemas = "('mysql', 'information_schema', 'performance_schema', 'sys')"
+
             # InnoDB buffer pool by table
             if include_bp:
                 try:
@@ -738,6 +744,7 @@ Helps optimize table caching parameters."""
                             pages_old,
                             rows_cached
                         FROM sys.innodb_buffer_stats_by_table
+                        WHERE object_schema NOT IN {system_schemas}
                         ORDER BY allocated DESC
                         LIMIT {top_n}
                     """

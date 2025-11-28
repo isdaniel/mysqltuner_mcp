@@ -29,7 +29,7 @@ dev = [
 ]
 
 [project.scripts]
-mysqltuner-mcp = "mysqltuner_mcp:run"
+mysqltuner-mcp = "mysqltuner_mcp:main"
 
 [project.urls]
 Homepage = "https://github.com/isdaniel/mysqltuner_mcp"
