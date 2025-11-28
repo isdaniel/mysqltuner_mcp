@@ -1,0 +1,15 @@
+runtime: container
+startCommand:
+  type: http
+  configSchema:
+    type: object
+    required:
+      - database_uri
+    properties:
+      database_uri:
+        type: string
+        title: "Database URI"
+        description: "MySQL connection string (e.g., mysql://user:password@host:port/database)"
+build:
+  dockerfile: "Dockerfile.streamable-http"
+  dockerBuildPath: "."

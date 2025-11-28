@@ -1,0 +1,56 @@
+[project]
+name = "mysqltuner_mcp"
+version = "0.0.1"
+description = "MySQL MCP Performance Tuning Server - AI-powered MySQL performance tuning capabilities"
+authors = [
+  { name = "DanielShih", email = "dog830228@gmail.com" },
+]
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+keywords = ["mysql", "mcp", "performance", "tuning", "database", "ai"]
+dependencies = [
+  "mcp[cli]>=1.12.0",
+  "aiomysql>=0.2.0",
+  "pymysql>=1.1.0",
+]
+
+[project.optional-dependencies]
+http = [
+    "starlette>=0.27.0",
+    "uvicorn>=0.23.0",
+]
+dev = [
+    "pytest>=9.0.1",
+    "pytest-asyncio>=1.3.0",
+    "pytest-cov>=7.0.0",
+    "black>=25.11.0",
+    "ruff>=0.14.6",
+]
+
+[project.scripts]
+mysqltuner-mcp = "mysqltuner_mcp:run"
+
+[project.urls]
+Homepage = "https://github.com/isdaniel/mysqltuner_mcp"
+Repository = "https://github.com/isdaniel/mysqltuner_mcp"
+Issues = "https://github.com/isdaniel/mysqltuner_mcp/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mysqltuner_mcp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
