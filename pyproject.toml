@@ -1,6 +1,6 @@
 [project]
 name = "mysqltuner_mcp"
-version = "0.0.1"
+version = "0.1.0"
 description = "MySQL MCP Performance Tuning Server - AI-powered MySQL performance tuning capabilities"
 authors = [
   { name = "DanielShih", email = "dog830228@gmail.com" },
