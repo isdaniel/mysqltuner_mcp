@@ -28,13 +28,16 @@ class IndexRecommendationsToolHandler(ToolHandler):
     destructive_hint = False
     idempotent_hint = True
     open_world_hint = False
-    description = """Get AI-powered index recommendations for MySQL.
+    description = """Get AI-powered index recommendations for MySQL user tables.
 
 Analyzes query patterns from performance_schema to recommend indexes:
 - Identifies queries with full table scans
 - Finds queries not using indexes efficiently
 - Suggests composite indexes for multi-column filters
 - Prioritizes recommendations by potential impact
+
+Note: This tool only analyzes user/custom tables and excludes MySQL system
+tables (mysql, information_schema, performance_schema, sys).
 
 Based on MySQL performance_schema statistics and query patterns.
 Similar to MySQLTuner's index analysis but with more detailed recommendations."""
@@ -291,7 +294,7 @@ class UnusedIndexesToolHandler(ToolHandler):
     destructive_hint = False
     idempotent_hint = True
     open_world_hint = False
-    description = """Find unused and duplicate indexes in MySQL.
+    description = """Find unused and duplicate indexes in MySQL user tables.
 
 Identifies:
 - Indexes with zero or very few reads since server start
@@ -302,6 +305,9 @@ Removing unused indexes can:
 - Reduce storage space
 - Speed up INSERT/UPDATE/DELETE operations
 - Reduce memory usage for index buffers
+
+Note: This tool only analyzes user/custom tables and excludes MySQL system
+tables (mysql, information_schema, performance_schema, sys).
 
 Based on information_schema and performance_schema statistics."""
 
@@ -362,7 +368,10 @@ Based on information_schema and performance_schema statistics."""
 
             # 1. Find unused indexes from performance_schema
             # Note: Requires performance_schema.table_io_waits_summary_by_index_usage
-            unused_query = """
+            # Define system schemas to exclude from analysis
+            system_schemas = "('mysql', 'information_schema', 'performance_schema', 'sys')"
+
+            unused_query = f"""
                 SELECT
                     s.TABLE_SCHEMA,
                     s.TABLE_NAME,
@@ -380,6 +389,7 @@ Based on information_schema and performance_schema statistics."""
                     AND s.TABLE_NAME = ps.OBJECT_NAME
                     AND s.INDEX_NAME = ps.INDEX_NAME
                 WHERE s.TABLE_SCHEMA = %s
+                    AND s.TABLE_SCHEMA NOT IN {system_schemas}
             """
 
             if exclude_primary:
@@ -451,11 +461,14 @@ Based on information_schema and performance_schema statistics."""
 
     async def _find_duplicate_indexes(self, schema: str, output: dict, exclude_primary: bool) -> None:
         """Find duplicate indexes (exact same columns)."""
-        query = """
+        # Define system schemas to exclude from analysis
+        system_schemas = "('mysql', 'information_schema', 'performance_schema', 'sys')"
+
+        query = f"""
             SELECT
                 TABLE_NAME,
                 GROUP_CONCAT(INDEX_NAME) as index_names,
-                GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) as columns,
+                COLUMN_NAME as columns,
                 COUNT(DISTINCT INDEX_NAME) as index_count
             FROM (
                 SELECT
@@ -464,6 +477,7 @@ Based on information_schema and performance_schema statistics."""
                     GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) as COLUMN_NAME
                 FROM information_schema.STATISTICS
                 WHERE TABLE_SCHEMA = %s
+                    AND TABLE_SCHEMA NOT IN {system_schemas}
         """
 
         if exclude_primary:
@@ -490,7 +504,10 @@ Based on information_schema and performance_schema statistics."""
 
     async def _find_redundant_indexes(self, schema: str, output: dict, exclude_primary: bool) -> None:
         """Find redundant indexes (one is prefix of another)."""
-        query = """
+        # Define system schemas to exclude from analysis
+        system_schemas = "('mysql', 'information_schema', 'performance_schema', 'sys')"
+
+        query = f"""
             SELECT
                 s1.TABLE_NAME,
                 s1.INDEX_NAME as shorter_index,
@@ -506,12 +523,13 @@ Based on information_schema and performance_schema statistics."""
                     COUNT(*) as col_count
                 FROM information_schema.STATISTICS
                 WHERE TABLE_SCHEMA = %s
+                    AND TABLE_SCHEMA NOT IN {system_schemas}
         """
 
         if exclude_primary:
             query += " AND INDEX_NAME != 'PRIMARY'"
 
-        query += """
+        query += f"""
                 GROUP BY TABLE_SCHEMA, TABLE_NAME, INDEX_NAME
             ) s1
             JOIN (
@@ -523,6 +541,7 @@ Based on information_schema and performance_schema statistics."""
                     COUNT(*) as col_count
                 FROM information_schema.STATISTICS
                 WHERE TABLE_SCHEMA = %s
+                    AND TABLE_SCHEMA NOT IN {system_schemas}
         """
 
         if exclude_primary:
@@ -559,7 +578,7 @@ class IndexStatsToolHandler(ToolHandler):
     destructive_hint = False
     idempotent_hint = True
     open_world_hint = False
-    description = """Get detailed index statistics for MySQL tables.
+    description = """Get detailed index statistics for MySQL user tables.
 
 Returns:
 - Index cardinality and selectivity
@@ -570,7 +589,10 @@ Returns:
 Helps identify:
 - Low cardinality indexes
 - Oversized indexes
-- Infrequently used indexes"""
+- Infrequently used indexes
+
+Note: This tool only analyzes user/custom tables and excludes MySQL system
+tables (mysql, information_schema, performance_schema, sys)."""
 
     def __init__(self, sql_driver: SqlDriver):
         self.sql_driver = sql_driver
@@ -612,8 +634,11 @@ Helps identify:
             if not schema_name:
                 schema_name = await self.sql_driver.execute_scalar("SELECT DATABASE()")
 
+            # Define system schemas to exclude from analysis
+            system_schemas = "('mysql', 'information_schema', 'performance_schema', 'sys')"
+
             # Build query for index statistics
-            query = """
+            query = f"""
                 SELECT
                     s.TABLE_NAME,
                     s.INDEX_NAME,
@@ -634,6 +659,7 @@ Helps identify:
                     AND s.TABLE_NAME = ps.OBJECT_NAME
                     AND s.INDEX_NAME = ps.INDEX_NAME
                 WHERE s.TABLE_SCHEMA = %s
+                    AND s.TABLE_SCHEMA NOT IN {system_schemas}
             """
 
             params = [schema_name]

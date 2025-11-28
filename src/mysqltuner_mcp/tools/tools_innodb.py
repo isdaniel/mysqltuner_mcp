@@ -429,13 +429,17 @@ Provides actionable recommendations for InnoDB optimization."""
         """Get detailed InnoDB metrics from information_schema and sys."""
 
         try:
+            # Define system schemas to exclude from analysis
+            system_schemas = "('mysql', 'information_schema', 'performance_schema', 'sys')"
+
             # Try to get buffer pool stats by schema
-            bp_schema_query = """
+            bp_schema_query = f"""
                 SELECT
                     object_schema,
                     ROUND(SUM(allocated) / 1024 / 1024, 2) as allocated_mb,
                     SUM(pages) as pages
                 FROM sys.x$innodb_buffer_stats_by_schema
+                WHERE object_schema NOT IN {system_schemas}
                 GROUP BY object_schema
                 ORDER BY allocated_mb DESC
                 LIMIT 10
@@ -533,6 +537,9 @@ Analyzes:
 - Memory allocation patterns
 - Recommendations for buffer pool sizing
 
+Note: When analyzing by schema/table, this tool only shows user/custom tables
+and excludes MySQL system tables (mysql, information_schema, performance_schema, sys).
+
 Uses sys schema views for detailed breakdown when available."""
 
     def __init__(self, sql_driver: SqlDriver):
@@ -609,16 +616,20 @@ Uses sys schema views for detailed breakdown when available."""
                 "disk_reads": reads
             }
 
+            # Define system schemas to exclude from analysis
+            system_schemas = "('mysql', 'information_schema', 'performance_schema', 'sys')"
+
             # Get breakdown by schema
             if by_schema:
                 try:
-                    schema_query = """
+                    schema_query = f"""
                         SELECT
                             object_schema,
                             ROUND(allocated / 1024 / 1024, 2) as allocated_mb,
                             ROUND(data / 1024 / 1024, 2) as data_mb,
                             pages
                         FROM sys.innodb_buffer_stats_by_schema
+                        WHERE object_schema NOT IN {system_schemas}
                         ORDER BY allocated DESC
                     """
                     schema_results = await self.sql_driver.execute_query(schema_query)
@@ -648,6 +659,7 @@ Uses sys schema views for detailed breakdown when available."""
                             ROUND(data / 1024 / 1024, 2) as data_mb,
                             pages
                         FROM sys.innodb_buffer_stats_by_table
+                        WHERE object_schema NOT IN {system_schemas}
                         ORDER BY allocated DESC
                         LIMIT {top_n}
                     """

@@ -38,7 +38,11 @@ Returns the top N slowest queries with detailed statistics:
 - Temporary tables usage
 
 Requires performance_schema to be enabled (default in MySQL 5.6+).
-For older versions, use the slow query log instead."""
+For older versions, use the slow query log instead.
+
+Note: This tool excludes queries against MySQL system schemas
+(mysql, information_schema, performance_schema, sys) to focus on
+user/application query performance."""
 
     def __init__(self, sql_driver: SqlDriver):
         self.sql_driver = sql_driver
@@ -94,8 +98,11 @@ For older versions, use the slow query log instead."""
             }
             order_column = order_map.get(order_by, "SUM_TIMER_WAIT")
 
+            # Define system schemas to exclude from analysis
+            system_schemas = "('mysql', 'information_schema', 'performance_schema', 'sys')"
+
             # Build query for performance_schema
-            query = """
+            query = f"""
                 SELECT
                     DIGEST_TEXT as query_text,
                     SCHEMA_NAME as schema_name,
@@ -117,6 +124,7 @@ For older versions, use the slow query log instead."""
                 FROM performance_schema.events_statements_summary_by_digest
                 WHERE DIGEST_TEXT IS NOT NULL
                     AND SUM_TIMER_WAIT >= %s
+                    AND (SCHEMA_NAME IS NULL OR SCHEMA_NAME NOT IN {system_schemas})
             """
 
             params = [min_exec_time_ms * 1000000000]  # Convert ms to picoseconds
@@ -391,7 +399,7 @@ class TableStatsToolHandler(ToolHandler):
     destructive_hint = False
     idempotent_hint = True
     open_world_hint = False
-    description = """Get detailed statistics for MySQL tables.
+    description = """Get detailed statistics for MySQL user tables.
 
 Returns information about:
 - Table size (data, indexes, total)
@@ -404,7 +412,10 @@ Returns information about:
 Helps identify tables that may need:
 - Optimization (OPTIMIZE TABLE)
 - Index improvements
-- Partitioning consideration"""
+- Partitioning consideration
+
+Note: This tool only analyzes user/custom tables and excludes MySQL system
+tables (mysql, information_schema, performance_schema, sys)."""
 
     def __init__(self, sql_driver: SqlDriver):
         self.sql_driver = sql_driver
@@ -462,8 +473,11 @@ Helps identify tables that may need:
             }
             order_column = order_map.get(order_by, "(DATA_LENGTH + INDEX_LENGTH)")
 
+            # Define system schemas to exclude from analysis
+            system_schemas = "('mysql', 'information_schema', 'performance_schema', 'sys')"
+
             # Build table stats query
-            query = """
+            query = f"""
                 SELECT
                     TABLE_NAME,
                     TABLE_TYPE,
@@ -480,6 +494,7 @@ Helps identify tables that may need:
                     TABLE_COLLATION
                 FROM information_schema.TABLES
                 WHERE TABLE_SCHEMA = %s
+                    AND TABLE_SCHEMA NOT IN {system_schemas}
             """
             params = [schema_name]
 
@@ -558,7 +573,10 @@ Helps identify tables that may need:
 
     async def _get_table_indexes(self, schema: str, table: str) -> list[dict]:
         """Get index information for a table."""
-        query = """
+        # Define system schemas to exclude from analysis
+        system_schemas = "('mysql', 'information_schema', 'performance_schema', 'sys')"
+
+        query = f"""
             SELECT
                 INDEX_NAME,
                 NON_UNIQUE,
@@ -569,6 +587,7 @@ Helps identify tables that may need:
                 NULLABLE
             FROM information_schema.STATISTICS
             WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
+                AND TABLE_SCHEMA NOT IN {system_schemas}
             ORDER BY INDEX_NAME, SEQ_IN_INDEX
         """
 

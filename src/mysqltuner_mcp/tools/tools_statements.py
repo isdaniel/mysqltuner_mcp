@@ -41,7 +41,11 @@ Provides comprehensive analysis of:
 - Most expensive queries
 
 Based on MySQLTuner's performance schema analysis.
-Requires performance_schema enabled."""
+Requires performance_schema enabled.
+
+Note: This tool excludes queries against MySQL system schemas
+(mysql, information_schema, performance_schema, sys) to focus on
+user/application query analysis."""
 
     def __init__(self, sql_driver: SqlDriver):
         self.sql_driver = sql_driver
@@ -120,16 +124,16 @@ Requires performance_schema enabled."""
             }
             order_col = order_column_map.get(order_by, "total_latency")
 
+            # Define system schemas to exclude from analysis
+            system_schemas = "('mysql', 'information_schema', 'performance_schema', 'sys')"
+
             # Try sys.statement_analysis view first
             try:
-                where_clause = ""
+                where_clause = f"WHERE (db IS NULL OR db NOT IN {system_schemas})"
                 if schema_name:
                     where_clause = f"WHERE db = '{schema_name}'"
                 if min_exec_count > 1:
-                    if where_clause:
-                        where_clause += f" AND exec_count >= {min_exec_count}"
-                    else:
-                        where_clause = f"WHERE exec_count >= {min_exec_count}"
+                    where_clause += f" AND exec_count >= {min_exec_count}"
 
                 query = f"""
                     SELECT
@@ -153,14 +157,11 @@ Requires performance_schema enabled."""
             except Exception:
                 # Fall back to performance_schema direct query
                 use_sys = False
-                where_clause = ""
+                where_clause = f"WHERE (schema_name IS NULL OR schema_name NOT IN {system_schemas})"
                 if schema_name:
                     where_clause = f"WHERE schema_name = '{schema_name}'"
                 if min_exec_count > 1:
-                    if where_clause:
-                        where_clause += f" AND count_star >= {min_exec_count}"
-                    else:
-                        where_clause = f"WHERE count_star >= {min_exec_count}"
+                    where_clause += f" AND count_star >= {min_exec_count}"
 
                 ps_order_map = {
                     "total_latency": "sum_timer_wait",
@@ -286,7 +287,11 @@ Temporary tables can cause performance issues when:
 - They're created too frequently
 - They grow too large
 
-Identifies queries that should be optimized."""
+Identifies queries that should be optimized.
+
+Note: This tool excludes queries against MySQL system schemas
+(mysql, information_schema, performance_schema, sys) to focus on
+user/application query analysis."""
 
     def __init__(self, sql_driver: SqlDriver):
         self.sql_driver = sql_driver
@@ -434,7 +439,11 @@ Identifies queries with:
 - Sort merge passes
 
 High file sort ratios indicate need for index optimization
-or sort_buffer_size increase."""
+or sort_buffer_size increase.
+
+Note: This tool excludes queries against MySQL system schemas
+(mysql, information_schema, performance_schema, sys) to focus on
+user/application query analysis."""
 
     def __init__(self, sql_driver: SqlDriver):
         self.sql_driver = sql_driver
@@ -594,7 +603,11 @@ Identifies queries that:
 - Don't use any index
 - Use a non-optimal index
 
-These queries are prime candidates for index optimization."""
+These queries are prime candidates for index optimization.
+
+Note: This tool excludes queries against MySQL system schemas
+(mysql, information_schema, performance_schema, sys) to focus on
+user/application query analysis."""
 
     def __init__(self, sql_driver: SqlDriver):
         self.sql_driver = sql_driver
@@ -632,6 +645,9 @@ These queries are prime candidates for index optimization."""
                 "statements": [],
                 "recommendations": []
             }
+
+            # Define system schemas to exclude from analysis
+            system_schemas = "('mysql', 'information_schema', 'performance_schema', 'sys')"
 
             # Try sys schema view first
             try:
@@ -772,7 +788,11 @@ Identifies queries with:
 - Warning counts
 - Error rates
 
-Helps identify problematic application queries."""
+Helps identify problematic application queries.
+
+Note: This tool excludes queries against MySQL system schemas
+(mysql, information_schema, performance_schema, sys) to focus on
+user/application query analysis."""
 
     def __init__(self, sql_driver: SqlDriver):
         self.sql_driver = sql_driver
