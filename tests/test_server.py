@@ -238,7 +238,7 @@ class TestMySQLTunerServer:
         ref = PromptReference(type="ref/prompt", name="health_check")
         argument = {"name": "focus_area", "value": ""}
 
-        result = await server._get_completions(ref, argument)
+        result = await server._get_completions(ref, argument, None)
 
         assert result.completion is not None
         assert "memory" in result.completion.values
@@ -254,7 +254,7 @@ class TestMySQLTunerServer:
         ref = PromptReference(type="ref/prompt", name="health_check")
         argument = {"name": "focus_area", "value": "mem"}
 
-        result = await server._get_completions(ref, argument)
+        result = await server._get_completions(ref, argument, None)
 
         assert result.completion is not None
         assert "memory" in result.completion.values
@@ -270,7 +270,7 @@ class TestMySQLTunerServer:
         ref = PromptReference(type="ref/prompt", name="optimize_slow_query")
         argument = {"name": "table_name", "value": ""}
 
-        result = await server._get_completions(ref, argument)
+        result = await server._get_completions(ref, argument, None)
 
         assert result.completion is not None
         assert "users" in result.completion.values
@@ -285,7 +285,7 @@ class TestMySQLTunerServer:
         ref = PromptReference(type="ref/prompt", name="index_review")
         argument = {"name": "schema_name", "value": ""}
 
-        result = await server._get_completions(ref, argument)
+        result = await server._get_completions(ref, argument, None)
 
         assert result.completion is not None
         assert "public" in result.completion.values
@@ -299,7 +299,7 @@ class TestMySQLTunerServer:
         ref = ResourceTemplateReference(type="ref/resource", uri="mysql://tuner/{template}")
         argument = {"name": "template", "value": ""}
 
-        result = await server._get_completions(ref, argument)
+        result = await server._get_completions(ref, argument, None)
 
         assert result.completion is not None
         assert len(result.completion.values) == 0
@@ -313,7 +313,7 @@ class TestMySQLTunerServer:
         ref = PromptReference(type="ref/prompt", name="unknown_prompt")
         argument = {"name": "arg", "value": ""}
 
-        result = await server._get_completions(ref, argument)
+        result = await server._get_completions(ref, argument, None)
 
         assert result.completion is not None
         assert len(result.completion.values) == 0
