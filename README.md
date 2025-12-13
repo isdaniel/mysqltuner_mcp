@@ -330,4 +330,4 @@ pip install -e .
 ```
 
 <!-- Need to add this line for MCP registry publication -->
-<!-- mcp-name: io.github.isdaniel/pgtuner_mcp -->
+<!-- mcp-name: io.github.isdaniel/mysqltuner_mcp -->
