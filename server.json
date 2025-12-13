@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+  "name": "io.github.isdaniel/mysqltuner_mcp",
+  "title": "MySQL performance Tuner MCP Server",
+  "description": "MySQL MCP Performance Tuning Server - AI-powered MySQL performance tuning capabilities",
+  "repository": {
+    "url": "https://github.com/isdaniel/mysqltuner_mcp",
+    "source": "github"
+  },
+  "version": "0.1.1",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "mysqltuner-mcp",
+      "version": "0.1.1",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
