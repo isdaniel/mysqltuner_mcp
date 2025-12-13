@@ -328,3 +328,6 @@ python -m venv .venv
 source .venv/bin/activate  # or .venv\Scripts\activate on Windows
 pip install -e .
 ```
+
+<!-- Need to add this line for MCP registry publication -->
+<!-- mcp-name: io.github.isdaniel/pgtuner_mcp -->
