@@ -661,9 +661,12 @@ Uses sys schema views for detailed breakdown when available."""
                         FROM sys.innodb_buffer_stats_by_table
                         WHERE object_schema NOT IN {system_schemas}
                         ORDER BY allocated DESC
-                        LIMIT {top_n}
+                        LIMIT %s
                     """
-                    table_results = await self.sql_driver.execute_query(table_query)
+                    table_results = await self.sql_driver.execute_query(
+                        table_query,
+                        [top_n],
+                    )
                     output["by_table"] = [
                         {
                             "schema": row["object_schema"],

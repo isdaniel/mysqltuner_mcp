@@ -41,6 +41,7 @@ from .tools_statements import (
     StatementsSortingToolHandler,
     StatementsFullScansToolHandler,
     StatementErrorsToolHandler,
+    LongQueryTypeCollationIssuesToolHandler,
 )
 from .tools_memory import (
     MemoryCalculationsToolHandler,
@@ -89,6 +90,7 @@ __all__ = [
     "StatementsSortingToolHandler",
     "StatementsFullScansToolHandler",
     "StatementErrorsToolHandler",
+    "LongQueryTypeCollationIssuesToolHandler",
     # Memory
     "MemoryCalculationsToolHandler",
     "MemoryByHostToolHandler",

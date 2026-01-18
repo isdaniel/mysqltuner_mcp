@@ -515,7 +515,7 @@ Requires performance_schema memory instrumentation enabled."""
             # Check if memory instrumentation is available
             try:
                 if group_by == "host":
-                    query = f"""
+                    query = """
                         SELECT
                             host,
                             current_count_used,
@@ -526,10 +526,10 @@ Requires performance_schema memory instrumentation enabled."""
                         FROM sys.memory_by_host_by_current_bytes
                         WHERE host IS NOT NULL
                         ORDER BY current_allocated DESC
-                        LIMIT {limit}
+                        LIMIT %s
                     """
                 elif group_by == "user":
-                    query = f"""
+                    query = """
                         SELECT
                             user,
                             current_count_used,
@@ -540,10 +540,10 @@ Requires performance_schema memory instrumentation enabled."""
                         FROM sys.memory_by_user_by_current_bytes
                         WHERE user IS NOT NULL
                         ORDER BY current_allocated DESC
-                        LIMIT {limit}
+                        LIMIT %s
                     """
                 else:  # event_name
-                    query = f"""
+                    query = """
                         SELECT
                             event_name,
                             current_count,
@@ -553,10 +553,10 @@ Requires performance_schema memory instrumentation enabled."""
                             high_alloc
                         FROM sys.memory_global_by_current_bytes
                         ORDER BY current_alloc DESC
-                        LIMIT {limit}
+                        LIMIT %s
                     """
 
-                results = await self.sql_driver.execute_query(query)
+                results = await self.sql_driver.execute_query(query, [limit])
 
                 for row in results:
                     entry = {}
@@ -746,9 +746,12 @@ Helps optimize table caching parameters."""
                         FROM sys.innodb_buffer_stats_by_table
                         WHERE object_schema NOT IN {system_schemas}
                         ORDER BY allocated DESC
-                        LIMIT {top_n}
+                        LIMIT %s
                     """
-                    bp_results = await self.sql_driver.execute_query(bp_query)
+                    bp_results = await self.sql_driver.execute_query(
+                        bp_query,
+                        [top_n],
+                    )
 
                     for row in bp_results:
                         output["buffer_pool_by_table"].append({

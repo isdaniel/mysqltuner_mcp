@@ -108,11 +108,8 @@ Based on MySQLTuner's engine analysis patterns."""
                 })
 
             # Get table count and size by engine
-            where_clause = "WHERE TABLE_SCHEMA NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')"
-            if schema_name:
-                where_clause = f"WHERE TABLE_SCHEMA = '{schema_name}'"
-
-            engine_stats_query = f"""
+            params = [schema_name, schema_name, schema_name]
+            engine_stats_query = """
                 SELECT
                     ENGINE,
                     COUNT(*) as table_count,
@@ -122,13 +119,16 @@ Based on MySQLTuner's engine analysis patterns."""
                     SUM(DATA_LENGTH + INDEX_LENGTH) as total_size,
                     SUM(DATA_FREE) as data_free
                 FROM information_schema.TABLES
-                {where_clause}
+                WHERE (
+                    (%s IS NULL AND TABLE_SCHEMA NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys'))
+                    OR (%s IS NOT NULL AND TABLE_SCHEMA = %s)
+                )
                     AND TABLE_TYPE = 'BASE TABLE'
                     AND ENGINE IS NOT NULL
                 GROUP BY ENGINE
                 ORDER BY total_size DESC
             """
-            engine_stats = await self.sql_driver.execute_query(engine_stats_query)
+            engine_stats = await self.sql_driver.execute_query(engine_stats_query, params)
 
             total_tables = 0
             total_data = 0
@@ -326,12 +326,10 @@ Based on MySQLTuner's engine analysis patterns."""
     async def _get_table_details(self, output: dict, schema_name: str = None) -> None:
         """Get detailed table information by engine."""
 
-        where_clause = "WHERE TABLE_SCHEMA NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')"
-        if schema_name:
-            where_clause = f"WHERE TABLE_SCHEMA = '{schema_name}'"
+        params = [schema_name, schema_name, schema_name]
 
         # Get non-InnoDB tables (potential migration candidates)
-        non_innodb_query = f"""
+        non_innodb_query = """
             SELECT
                 TABLE_SCHEMA,
                 TABLE_NAME,
@@ -341,13 +339,16 @@ Based on MySQLTuner's engine analysis patterns."""
                 INDEX_LENGTH,
                 DATA_FREE
             FROM information_schema.TABLES
-            {where_clause}
+            WHERE (
+                (%s IS NULL AND TABLE_SCHEMA NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys'))
+                OR (%s IS NOT NULL AND TABLE_SCHEMA = %s)
+            )
                 AND ENGINE != 'InnoDB'
                 AND TABLE_TYPE = 'BASE TABLE'
             ORDER BY DATA_LENGTH DESC
             LIMIT 20
         """
-        non_innodb = await self.sql_driver.execute_query(non_innodb_query)
+        non_innodb = await self.sql_driver.execute_query(non_innodb_query, params)
 
         output["non_innodb_tables"] = [
             {
@@ -366,7 +367,7 @@ Based on MySQLTuner's engine analysis patterns."""
         ]
 
         # Get fragmented tables (DATA_FREE > 10% of DATA_LENGTH)
-        fragmented_query = f"""
+        fragmented_query = """
             SELECT
                 TABLE_SCHEMA,
                 TABLE_NAME,
@@ -376,14 +377,17 @@ Based on MySQLTuner's engine analysis patterns."""
                 DATA_FREE,
                 ROUND(DATA_FREE / DATA_LENGTH * 100, 2) as fragmentation_pct
             FROM information_schema.TABLES
-            {where_clause}
+            WHERE (
+                (%s IS NULL AND TABLE_SCHEMA NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys'))
+                OR (%s IS NOT NULL AND TABLE_SCHEMA = %s)
+            )
                 AND DATA_LENGTH > 0
                 AND DATA_FREE > DATA_LENGTH * 0.1
                 AND TABLE_TYPE = 'BASE TABLE'
             ORDER BY DATA_FREE DESC
             LIMIT 20
         """
-        fragmented = await self.sql_driver.execute_query(fragmented_query)
+        fragmented = await self.sql_driver.execute_query(fragmented_query, params)
 
         output["fragmented_tables"] = [
             {
@@ -505,14 +509,7 @@ High fragmentation wastes disk space and can slow queries."""
                 "recommendations": []
             }
 
-            where_clause = """
-                WHERE TABLE_SCHEMA NOT IN
-                    ('mysql', 'information_schema', 'performance_schema', 'sys')
-            """
-            if schema_name:
-                where_clause = f"WHERE TABLE_SCHEMA = '{schema_name}'"
-
-            query = f"""
+            query = """
                 SELECT
                     TABLE_SCHEMA,
                     TABLE_NAME,
@@ -523,15 +520,21 @@ High fragmentation wastes disk space and can slow queries."""
                     DATA_FREE,
                     ROUND(DATA_FREE / DATA_LENGTH * 100, 2) as fragmentation_pct
                 FROM information_schema.TABLES
-                {where_clause}
+                WHERE (
+                    (%s IS NULL AND TABLE_SCHEMA NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys'))
+                    OR (%s IS NOT NULL AND TABLE_SCHEMA = %s)
+                )
                     AND TABLE_TYPE = 'BASE TABLE'
                     AND DATA_LENGTH > 0
-                    AND DATA_FREE >= {min_data_free}
-                    AND (DATA_FREE / DATA_LENGTH * 100) >= {min_frag_pct}
+                    AND DATA_FREE >= %s
+                    AND (DATA_FREE / DATA_LENGTH * 100) >= %s
                 ORDER BY DATA_FREE DESC
-                LIMIT {limit}
+                LIMIT %s
             """
-            results = await self.sql_driver.execute_query(query)
+            results = await self.sql_driver.execute_query(
+                query,
+                [schema_name, schema_name, schema_name, min_data_free, min_frag_pct, limit],
+            )
 
             total_wasted = 0
             for row in results:
@@ -659,15 +662,8 @@ Based on MySQLTuner's auto-increment analysis."""
                 "bigint": {"signed": 9223372036854775807, "unsigned": 18446744073709551615}
             }
 
-            where_clause = """
-                WHERE TABLE_SCHEMA NOT IN
-                    ('mysql', 'information_schema', 'performance_schema', 'sys')
-            """
-            if schema_name:
-                where_clause = f"WHERE TABLE_SCHEMA = '{schema_name}'"
-
             # Get auto_increment columns
-            query = f"""
+            query = """
                 SELECT
                     t.TABLE_SCHEMA,
                     t.TABLE_NAME,
@@ -679,12 +675,18 @@ Based on MySQLTuner's auto-increment analysis."""
                 JOIN information_schema.COLUMNS c
                     ON t.TABLE_SCHEMA = c.TABLE_SCHEMA
                     AND t.TABLE_NAME = c.TABLE_NAME
-                {where_clause}
+                WHERE (
+                    (%s IS NULL AND t.TABLE_SCHEMA NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys'))
+                    OR (%s IS NOT NULL AND t.TABLE_SCHEMA = %s)
+                )
                     AND t.AUTO_INCREMENT IS NOT NULL
                     AND c.EXTRA LIKE '%auto_increment%'
                 ORDER BY t.AUTO_INCREMENT DESC
             """
-            results = await self.sql_driver.execute_query(query)
+            results = await self.sql_driver.execute_query(
+                query,
+                [schema_name, schema_name, schema_name],
+            )
 
             at_risk_count = 0
 

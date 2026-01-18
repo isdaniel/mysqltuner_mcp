@@ -243,7 +243,11 @@ WARNING: With analyze=true, the query is actually executed!"""
         try:
             self.validate_required_args(arguments, ["query"])
 
-            query = arguments["query"]
+            query = arguments["query"].strip()
+            if not query:
+                raise ValueError("Query cannot be empty")
+            if ";" in query.rstrip(";"):
+                raise ValueError("Multiple statements are not allowed")
             analyze = arguments.get("analyze", False)
             format_type = arguments.get("format", "json")
 

@@ -14,6 +14,7 @@ Based on MySQLTuner performance schema analysis patterns.
 from __future__ import annotations
 
 from collections.abc import Sequence
+import re
 from typing import Any
 
 from mcp.types import TextContent, Tool
@@ -129,11 +130,14 @@ user/application query analysis."""
 
             # Try sys.statement_analysis view first
             try:
-                where_clause = f"WHERE (db IS NULL OR db NOT IN {system_schemas})"
-                if schema_name:
-                    where_clause = f"WHERE db = '{schema_name}'"
-                if min_exec_count > 1:
-                    where_clause += f" AND exec_count >= {min_exec_count}"
+                params = [
+                    schema_name,
+                    schema_name,
+                    schema_name,
+                    min_exec_count,
+                    min_exec_count,
+                    limit,
+                ]
 
                 query = f"""
                     SELECT
@@ -148,20 +152,27 @@ user/application query analysis."""
                         rows_examined,
                         rows_examined_avg
                     FROM sys.statement_analysis
-                    {where_clause}
+                    WHERE (
+                        (%s IS NULL AND (db IS NULL OR db NOT IN {system_schemas}))
+                        OR (%s IS NOT NULL AND db = %s)
+                    )
+                    AND (%s <= 1 OR exec_count >= %s)
                     ORDER BY {order_col} DESC
-                    LIMIT {limit}
+                    LIMIT %s
                 """
-                results = await self.sql_driver.execute_query(query)
+                results = await self.sql_driver.execute_query(query, params)
                 use_sys = True
             except Exception:
                 # Fall back to performance_schema direct query
                 use_sys = False
-                where_clause = f"WHERE (schema_name IS NULL OR schema_name NOT IN {system_schemas})"
-                if schema_name:
-                    where_clause = f"WHERE schema_name = '{schema_name}'"
-                if min_exec_count > 1:
-                    where_clause += f" AND count_star >= {min_exec_count}"
+                params = [
+                    schema_name,
+                    schema_name,
+                    schema_name,
+                    min_exec_count,
+                    min_exec_count,
+                    limit,
+                ]
 
                 ps_order_map = {
                     "total_latency": "sum_timer_wait",
@@ -186,11 +197,15 @@ user/application query analysis."""
                         sum_no_index_used as no_index_used,
                         sum_no_good_index_used as no_good_index
                     FROM performance_schema.events_statements_summary_by_digest
-                    {where_clause}
+                    WHERE (
+                        (%s IS NULL AND (schema_name IS NULL OR schema_name NOT IN {system_schemas}))
+                        OR (%s IS NOT NULL AND schema_name = %s)
+                    )
+                    AND (%s <= 1 OR count_star >= %s)
                     ORDER BY {ps_order} DESC
-                    LIMIT {limit}
+                    LIMIT %s
                 """
-                results = await self.sql_driver.execute_query(query)
+                results = await self.sql_driver.execute_query(query, params)
 
             # Process results
             total_exec = 0
@@ -342,11 +357,14 @@ user/application query analysis."""
                         disk_tmp_tables,
                         avg_tmp_tables_per_query
                     FROM sys.statements_with_temp_tables
-                    {"WHERE disk_tmp_tables > 0" if disk_only else ""}
+                    WHERE (%s = 0 OR disk_tmp_tables > 0)
                     ORDER BY disk_tmp_tables DESC, memory_tmp_tables DESC
-                    LIMIT {limit}
+                    LIMIT %s
                 """
-                results = await self.sql_driver.execute_query(query)
+                results = await self.sql_driver.execute_query(
+                    query,
+                    [1 if disk_only else 0, limit],
+                )
 
                 for row in results:
                     stmt = {
@@ -362,10 +380,6 @@ user/application query analysis."""
 
             except Exception:
                 # Fall back to performance_schema
-                where_clause = "WHERE sum_created_tmp_tables > 0"
-                if disk_only:
-                    where_clause = "WHERE sum_created_tmp_disk_tables > 0"
-
                 query = f"""
                     SELECT
                         digest_text as query,
@@ -375,12 +389,16 @@ user/application query analysis."""
                         sum_created_tmp_tables as memory_tmp_tables,
                         sum_created_tmp_disk_tables as disk_tmp_tables
                     FROM performance_schema.events_statements_summary_by_digest
-                    {where_clause}
+                    WHERE sum_created_tmp_tables > 0
+                        AND (%s = 0 OR sum_created_tmp_disk_tables > 0)
                     ORDER BY sum_created_tmp_disk_tables DESC,
                              sum_created_tmp_tables DESC
-                    LIMIT {limit}
+                    LIMIT %s
                 """
-                results = await self.sql_driver.execute_query(query)
+                results = await self.sql_driver.execute_query(
+                    query,
+                    [1 if disk_only else 0, limit],
+                )
 
                 for row in results:
                     stmt = {
@@ -497,11 +515,14 @@ user/application query analysis."""
                         rows_sorted,
                         avg_rows_sorted
                     FROM sys.statements_with_sorting
-                    {"WHERE sort_merge_passes > 0" if file_sorts_only else ""}
+                    WHERE (%s = 0 OR sort_merge_passes > 0)
                     ORDER BY sort_merge_passes DESC, rows_sorted DESC
-                    LIMIT {limit}
+                    LIMIT %s
                 """
-                results = await self.sql_driver.execute_query(query)
+                results = await self.sql_driver.execute_query(
+                    query,
+                    [1 if file_sorts_only else 0, limit],
+                )
 
                 for row in results:
                     stmt = {
@@ -520,10 +541,6 @@ user/application query analysis."""
 
             except Exception:
                 # Fall back to performance_schema
-                where_clause = "WHERE sum_sort_rows > 0"
-                if file_sorts_only:
-                    where_clause = "WHERE sum_sort_merge_passes > 0"
-
                 query = f"""
                     SELECT
                         digest_text as query,
@@ -535,11 +552,15 @@ user/application query analysis."""
                         sum_sort_range as sorts_using_range,
                         sum_sort_rows as rows_sorted
                     FROM performance_schema.events_statements_summary_by_digest
-                    {where_clause}
+                    WHERE sum_sort_rows > 0
+                        AND (%s = 0 OR sum_sort_merge_passes > 0)
                     ORDER BY sum_sort_merge_passes DESC, sum_sort_rows DESC
-                    LIMIT {limit}
+                    LIMIT %s
                 """
-                results = await self.sql_driver.execute_query(query)
+                results = await self.sql_driver.execute_query(
+                    query,
+                    [1 if file_sorts_only else 0, limit],
+                )
 
                 for row in results:
                     stmt = {
@@ -665,11 +686,11 @@ user/application query analysis."""
                         rows_sent_avg,
                         rows_examined_avg
                     FROM sys.statements_with_full_table_scans
-                    WHERE rows_examined_avg >= {min_rows}
+                    WHERE rows_examined_avg >= %s
                     ORDER BY no_index_used_count DESC, rows_examined DESC
-                    LIMIT {limit}
+                    LIMIT %s
                 """
-                results = await self.sql_driver.execute_query(query)
+                results = await self.sql_driver.execute_query(query, [min_rows, limit])
 
                 for row in results:
                     stmt = {
@@ -710,11 +731,11 @@ user/application query analysis."""
                         ROUND(sum_rows_examined / count_star) as rows_examined_avg
                     FROM performance_schema.events_statements_summary_by_digest
                     WHERE (sum_no_index_used > 0 OR sum_no_good_index_used > 0)
-                        AND sum_rows_examined / count_star >= {min_rows}
+                        AND sum_rows_examined / count_star >= %s
                     ORDER BY sum_no_index_used DESC, sum_rows_examined DESC
-                    LIMIT {limit}
+                    LIMIT %s
                 """
-                results = await self.sql_driver.execute_query(query)
+                results = await self.sql_driver.execute_query(query, [min_rows, limit])
 
                 for row in results:
                     rows_examined = row.get("rows_examined") or 0
@@ -844,11 +865,14 @@ user/application query analysis."""
                         warnings,
                         warning_pct
                     FROM sys.statements_with_errors_or_warnings
-                    {"WHERE errors > 0" if errors_only else ""}
+                    WHERE (%s = 0 OR errors > 0)
                     ORDER BY errors DESC, warnings DESC
-                    LIMIT {limit}
+                    LIMIT %s
                 """
-                results = await self.sql_driver.execute_query(query)
+                results = await self.sql_driver.execute_query(
+                    query,
+                    [1 if errors_only else 0, limit],
+                )
 
                 for row in results:
                     stmt = {
@@ -865,10 +889,6 @@ user/application query analysis."""
 
             except Exception:
                 # Fall back to performance_schema
-                where_clause = "WHERE sum_errors > 0 OR sum_warnings > 0"
-                if errors_only:
-                    where_clause = "WHERE sum_errors > 0"
-
                 query = f"""
                     SELECT
                         digest_text as query,
@@ -880,11 +900,15 @@ user/application query analysis."""
                         sum_warnings as warnings,
                         ROUND(sum_warnings / count_star * 100, 2) as warning_pct
                     FROM performance_schema.events_statements_summary_by_digest
-                    {where_clause}
+                    WHERE (sum_errors > 0 OR sum_warnings > 0)
+                        AND (%s = 0 OR sum_errors > 0)
                     ORDER BY sum_errors DESC, sum_warnings DESC
-                    LIMIT {limit}
+                    LIMIT %s
                 """
-                results = await self.sql_driver.execute_query(query)
+                results = await self.sql_driver.execute_query(
+                    query,
+                    [1 if errors_only else 0, limit],
+                )
 
                 for row in results:
                     stmt = {
@@ -932,3 +956,569 @@ user/application query analysis."""
 
         except Exception as e:
             return self.format_error(e)
+
+
+class LongQueryTypeCollationIssuesToolHandler(ToolHandler):
+    """Tool handler for detecting type/collation issues in long-running queries."""
+
+    name = "analyze_long_queries_for_type_collation_issues"
+    title = "Long Query Type/Collation Analyzer"
+    read_only_hint = True
+    destructive_hint = False
+    idempotent_hint = True
+    open_world_hint = False
+    description = """Analyze long-running statements for type and collation mismatches.
+
+Checks for potential performance issues such as:
+- Implicit conversions between numeric and string types
+- Column-to-column comparisons with mismatched collations
+- Parameter placeholders that should match column type/collation
+
+This tool performs best-effort parsing of statement digests from
+performance_schema/sys views and compares referenced columns against
+information_schema metadata.
+
+Note: Results are heuristic and may not capture all query patterns.
+"""
+
+    NUMERIC_TYPES = {
+        "tinyint",
+        "smallint",
+        "mediumint",
+        "int",
+        "integer",
+        "bigint",
+        "decimal",
+        "numeric",
+        "float",
+        "double",
+        "real",
+        "bit",
+    }
+    STRING_TYPES = {
+        "char",
+        "varchar",
+        "text",
+        "tinytext",
+        "mediumtext",
+        "longtext",
+        "enum",
+        "set",
+    }
+    BINARY_TYPES = {
+        "binary",
+        "varbinary",
+        "blob",
+        "tinyblob",
+        "mediumblob",
+        "longblob",
+    }
+
+    def __init__(self, sql_driver: SqlDriver):
+        self.sql_driver = sql_driver
+
+    def get_tool_definition(self) -> Tool:
+        return Tool(
+            name=self.name,
+            description=self.description,
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "schema_name": {
+                        "type": "string",
+                        "description": "Filter by specific schema (optional)"
+                    },
+                    "order_by": {
+                        "type": "string",
+                        "description": "Order by metric",
+                        "enum": [
+                            "total_latency",
+                            "avg_latency",
+                            "exec_count"
+                        ],
+                        "default": "total_latency"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of statements to analyze",
+                        "default": 20
+                    },
+                    "min_exec_count": {
+                        "type": "integer",
+                        "description": "Minimum execution count filter",
+                        "default": 1
+                    }
+                },
+                "required": []
+            },
+            annotations=self.get_annotations()
+        )
+
+    async def run_tool(self, arguments: dict[str, Any]) -> Sequence[TextContent]:
+        try:
+            schema_name = arguments.get("schema_name")
+            order_by = arguments.get("order_by", "total_latency")
+            limit = arguments.get("limit", 20)
+            min_exec_count = arguments.get("min_exec_count", 1)
+
+            output = {
+                "summary": {},
+                "statements": [],
+                "recommendations": [],
+                "limitations": [
+                    "Heuristic parsing of statement digests; complex queries may be missed",
+                    "Placeholders cannot confirm actual parameter data types",
+                ],
+            }
+
+            ps_enabled = await self.sql_driver.execute_scalar(
+                "SELECT @@performance_schema"
+            )
+            if not ps_enabled or ps_enabled == "0":
+                output["error"] = "performance_schema is disabled"
+                output["recommendations"].append(
+                    "Enable performance_schema in my.cnf for statement analysis"
+                )
+                return self.format_json_result(output)
+
+            order_column_map = {
+                "total_latency": "total_latency",
+                "avg_latency": "avg_latency",
+                "exec_count": "exec_count",
+            }
+            order_col = order_column_map.get(order_by, "total_latency")
+
+            system_schemas = "('mysql', 'information_schema', 'performance_schema', 'sys')"
+
+            try:
+                params = [
+                    schema_name,
+                    schema_name,
+                    schema_name,
+                    min_exec_count,
+                    min_exec_count,
+                    limit,
+                ]
+
+                query = f"""
+                    SELECT
+                        query,
+                        db,
+                        exec_count,
+                        total_latency,
+                        avg_latency
+                    FROM sys.statement_analysis
+                    WHERE (
+                        (%s IS NULL AND (db IS NULL OR db NOT IN {system_schemas}))
+                        OR (%s IS NOT NULL AND db = %s)
+                    )
+                    AND (%s <= 1 OR exec_count >= %s)
+                    ORDER BY {order_col} DESC
+                    LIMIT %s
+                """
+                results = await self.sql_driver.execute_query(query, params)
+                use_sys = True
+            except Exception:
+                use_sys = False
+                params = [
+                    schema_name,
+                    schema_name,
+                    schema_name,
+                    min_exec_count,
+                    min_exec_count,
+                    limit,
+                ]
+
+                ps_order_map = {
+                    "total_latency": "sum_timer_wait",
+                    "avg_latency": "avg_timer_wait",
+                    "exec_count": "count_star",
+                }
+                ps_order = ps_order_map.get(order_by, "sum_timer_wait")
+
+                query = f"""
+                    SELECT
+                        digest_text as query,
+                        schema_name as db,
+                        count_star as exec_count,
+                        sum_timer_wait as total_latency_ps,
+                        avg_timer_wait as avg_latency_ps
+                    FROM performance_schema.events_statements_summary_by_digest
+                    WHERE (
+                        (%s IS NULL AND (schema_name IS NULL OR schema_name NOT IN {system_schemas}))
+                        OR (%s IS NOT NULL AND schema_name = %s)
+                    )
+                    AND (%s <= 1 OR count_star >= %s)
+                    ORDER BY {ps_order} DESC
+                    LIMIT %s
+                """
+                results = await self.sql_driver.execute_query(query, params)
+
+            issues_count = 0
+            implicit_conversion_count = 0
+            collation_mismatch_count = 0
+            parameter_alignment_count = 0
+
+            for row in results:
+                stmt_query = (row.get("query") or "")[:800]
+                stmt_db = row.get("db") or schema_name
+
+                stmt = {
+                    "query": stmt_query,
+                    "db": stmt_db,
+                    "exec_count": row.get("exec_count"),
+                    "issues": [],
+                }
+                if use_sys:
+                    stmt["total_latency"] = str(row.get("total_latency"))
+                    stmt["avg_latency"] = str(row.get("avg_latency"))
+                else:
+                    total_ps = row.get("total_latency_ps") or 0
+                    avg_ps = row.get("avg_latency_ps") or 0
+                    stmt["total_latency_ms"] = round(total_ps / 1000000000, 2)
+                    stmt["avg_latency_ms"] = round(avg_ps / 1000000000, 2)
+
+                if not stmt_query:
+                    output["statements"].append(stmt)
+                    continue
+
+                alias_map = self._extract_table_aliases(stmt_query, stmt_db)
+                comparisons = self._extract_comparisons(stmt_query)
+
+                column_refs = set()
+                for comp in comparisons:
+                    for side in ("left", "right"):
+                        col_ref = comp.get(side)
+                        if not col_ref or col_ref.get("type") != "column":
+                            continue
+                        alias = col_ref["alias"]
+                        if alias not in alias_map:
+                            continue
+                        schema, table = alias_map[alias]
+                        column_refs.add((schema, table, col_ref["column"]))
+
+                column_meta = await self._load_column_metadata(column_refs)
+
+                for comp in comparisons:
+                    left = comp.get("left")
+                    right = comp.get("right")
+
+                    if left and right and left.get("type") == "column" and right.get("type") == "column":
+                        issue = self._analyze_column_to_column(left, right, alias_map, column_meta)
+                        if issue:
+                            stmt["issues"].append(issue)
+                    else:
+                        issue = self._analyze_column_to_value(left, right, alias_map, column_meta)
+                        if issue:
+                            stmt["issues"].append(issue)
+
+                if stmt["issues"]:
+                    issues_count += len(stmt["issues"])
+                    implicit_conversion_count += sum(
+                        1 for i in stmt["issues"]
+                        if i.get("issue_type") == "implicit_conversion"
+                    )
+                    collation_mismatch_count += sum(
+                        1 for i in stmt["issues"]
+                        if i.get("issue_type") == "collation_mismatch"
+                    )
+                    parameter_alignment_count += sum(
+                        1 for i in stmt["issues"]
+                        if i.get("issue_type") == "parameter_alignment"
+                    )
+
+                output["statements"].append(stmt)
+
+            output["summary"] = {
+                "statements_analyzed": len(results),
+                "issues_found": issues_count,
+                "implicit_conversion_issues": implicit_conversion_count,
+                "collation_mismatch_issues": collation_mismatch_count,
+                "parameter_alignment_warnings": parameter_alignment_count,
+            }
+
+            if implicit_conversion_count:
+                output["recommendations"].append(
+                    "Align parameter and literal types with column data types to avoid implicit conversion"
+                )
+            if collation_mismatch_count:
+                output["recommendations"].append(
+                    "Ensure join/compare columns share the same collation or use explicit COLLATE"
+                )
+            if parameter_alignment_count:
+                output["recommendations"].append(
+                    "Bind parameters with the correct type and collation matching column definitions"
+                )
+
+            return self.format_json_result(output)
+
+        except Exception as e:
+            return self.format_error(e)
+
+    def _extract_table_aliases(self, query: str, default_schema: str | None) -> dict[str, tuple[str, str]]:
+        alias_map: dict[str, tuple[str, str]] = {}
+        pattern = re.compile(
+            r"\b(from|join)\s+([`\w\.]+)(?:\s+(?:as\s+)?([`\w]+))?",
+            re.IGNORECASE,
+        )
+        for match in pattern.finditer(query):
+            table_token = match.group(2)
+            alias = match.group(3)
+            if not table_token or table_token.startswith("("):
+                continue
+
+            table_token = self._strip_identifier(table_token)
+            schema = default_schema
+            table = table_token
+            if "." in table_token:
+                parts = table_token.split(".", 1)
+                schema = self._strip_identifier(parts[0])
+                table = self._strip_identifier(parts[1])
+
+            alias_name = self._strip_identifier(alias) if alias else table
+            if schema and table:
+                alias_map[alias_name] = (schema, table)
+
+        return alias_map
+
+    def _extract_comparisons(self, query: str) -> list[dict[str, Any]]:
+        comparisons: list[dict[str, Any]] = []
+        col_ref = r"(?P<alias>`?[\w]+`?)\.(?P<column>`?[\w]+`?)"
+        col_ref_2 = r"(?P<alias2>`?[\w]+`?)\.(?P<column2>`?[\w]+`?)"
+        literal = r"(?P<literal>'[^']*'|\"[^\"]*\"|\d+(?:\.\d+)?)"
+        param = r"(?P<param>\?)"
+        operators = r"=|<=>|<=|>=|<|>|like"
+
+        col_col = re.compile(
+            rf"{col_ref}\s*(?P<op>{operators})\s*{col_ref_2}",
+            re.IGNORECASE,
+        )
+        col_val = re.compile(
+            rf"{col_ref}\s*(?P<op>{operators})\s*(?:{literal}|{param})",
+            re.IGNORECASE,
+        )
+        val_col = re.compile(
+            rf"(?:{literal}|{param})\s*(?P<op>{operators})\s*{col_ref}",
+            re.IGNORECASE,
+        )
+
+        for match in col_col.finditer(query):
+            comparisons.append({
+                "left": {
+                    "type": "column",
+                    "alias": self._strip_identifier(match.group("alias")),
+                    "column": self._strip_identifier(match.group("column")),
+                },
+                "right": {
+                    "type": "column",
+                    "alias": self._strip_identifier(match.group("alias2")),
+                    "column": self._strip_identifier(match.group("column2")),
+                },
+                "operator": match.group("op").lower(),
+            })
+
+        for match in col_val.finditer(query):
+            value_type, value = self._extract_value(match.groupdict())
+            comparisons.append({
+                "left": {
+                    "type": "column",
+                    "alias": self._strip_identifier(match.group("alias")),
+                    "column": self._strip_identifier(match.group("column")),
+                },
+                "right": {
+                    "type": value_type,
+                    "value": value,
+                },
+                "operator": match.group("op").lower(),
+            })
+
+        for match in val_col.finditer(query):
+            value_type, value = self._extract_value(match.groupdict())
+            comparisons.append({
+                "left": {
+                    "type": "column",
+                    "alias": self._strip_identifier(match.group("alias")),
+                    "column": self._strip_identifier(match.group("column")),
+                },
+                "right": {
+                    "type": value_type,
+                    "value": value,
+                },
+                "operator": match.group("op").lower(),
+            })
+
+        return comparisons
+
+    def _extract_value(self, groups: dict[str, Any]) -> tuple[str, str]:
+        if groups.get("param") is not None:
+            return "parameter", "?"
+        literal = groups.get("literal")
+        if literal is None:
+            return "unknown", ""
+        if literal.startswith("'") or literal.startswith("\""):
+            return "string", literal
+        return "numeric", literal
+
+    async def _load_column_metadata(
+        self,
+        column_refs: set[tuple[str, str, str]],
+    ) -> dict[tuple[str, str, str], dict[str, Any]]:
+        if not column_refs:
+            return {}
+
+        conditions = []
+        params: list[Any] = []
+        for schema, table, column in column_refs:
+            conditions.append("(TABLE_SCHEMA=%s AND TABLE_NAME=%s AND COLUMN_NAME=%s)")
+            params.extend([schema, table, column])
+
+        query = """
+            SELECT
+                TABLE_SCHEMA,
+                TABLE_NAME,
+                COLUMN_NAME,
+                DATA_TYPE,
+                COLUMN_TYPE,
+                COLLATION_NAME,
+                CHARACTER_SET_NAME
+            FROM information_schema.COLUMNS
+            WHERE """ + " OR ".join(conditions)
+
+        results = await self.sql_driver.execute_query(query, params)
+        meta: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for row in results:
+            key = (row["TABLE_SCHEMA"], row["TABLE_NAME"], row["COLUMN_NAME"])
+            meta[key] = row
+        return meta
+
+    def _analyze_column_to_column(
+        self,
+        left: dict[str, Any],
+        right: dict[str, Any],
+        alias_map: dict[str, tuple[str, str]],
+        column_meta: dict[tuple[str, str, str], dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        left_key = self._resolve_column_key(left, alias_map)
+        right_key = self._resolve_column_key(right, alias_map)
+        if not left_key or not right_key:
+            return None
+
+        left_meta = column_meta.get(left_key)
+        right_meta = column_meta.get(right_key)
+        if not left_meta or not right_meta:
+            return None
+
+        left_type = (left_meta.get("DATA_TYPE") or "").lower()
+        right_type = (right_meta.get("DATA_TYPE") or "").lower()
+
+        left_cat = self._type_category(left_type)
+        right_cat = self._type_category(right_type)
+
+        if left_cat != right_cat and {left_cat, right_cat} <= {"numeric", "string"}:
+            return {
+                "issue_type": "implicit_conversion",
+                "left": self._format_column_ref(left_key),
+                "right": self._format_column_ref(right_key),
+                "details": "Comparing numeric column to string column can cause implicit conversion",
+                "recommendation": "Align column types or use explicit CAST to avoid conversion",
+            }
+
+        if left_cat == "string" and right_cat == "string":
+            left_collation = left_meta.get("COLLATION_NAME")
+            right_collation = right_meta.get("COLLATION_NAME")
+            if left_collation and right_collation and left_collation != right_collation:
+                return {
+                    "issue_type": "collation_mismatch",
+                    "left": self._format_column_ref(left_key),
+                    "right": self._format_column_ref(right_key),
+                    "details": f"Different collations: {left_collation} vs {right_collation}",
+                    "recommendation": "Ensure both columns use the same collation or add explicit COLLATE",
+                }
+
+        return None
+
+    def _analyze_column_to_value(
+        self,
+        left: dict[str, Any] | None,
+        right: dict[str, Any] | None,
+        alias_map: dict[str, tuple[str, str]],
+        column_meta: dict[tuple[str, str, str], dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        if not left or not right:
+            return None
+
+        col_ref = left if left.get("type") == "column" else right if right.get("type") == "column" else None
+        val_ref = right if col_ref is left else left
+        if not col_ref or not val_ref or val_ref.get("type") == "column":
+            return None
+
+        col_key = self._resolve_column_key(col_ref, alias_map)
+        if not col_key:
+            return None
+
+        meta = column_meta.get(col_key)
+        if not meta:
+            return None
+
+        col_type = (meta.get("DATA_TYPE") or "").lower()
+        col_cat = self._type_category(col_type)
+
+        val_type = val_ref.get("type")
+        if val_type == "parameter":
+            return {
+                "issue_type": "parameter_alignment",
+                "left": self._format_column_ref(col_key),
+                "right": "?",
+                "details": "Parameter type/collation should match column definition",
+                "recommendation": "Bind parameter using the same data type and collation as the column",
+            }
+
+        if col_cat == "numeric" and val_type == "string":
+            return {
+                "issue_type": "implicit_conversion",
+                "left": self._format_column_ref(col_key),
+                "right": val_ref.get("value"),
+                "details": "Numeric column compared to string literal",
+                "recommendation": "Use numeric literal or CAST parameter to numeric type",
+            }
+
+        if col_cat == "string" and val_type == "numeric":
+            return {
+                "issue_type": "implicit_conversion",
+                "left": self._format_column_ref(col_key),
+                "right": val_ref.get("value"),
+                "details": "String column compared to numeric literal",
+                "recommendation": "Use string literal or CAST parameter to match column type",
+            }
+
+        return None
+
+    def _resolve_column_key(
+        self,
+        col_ref: dict[str, Any],
+        alias_map: dict[str, tuple[str, str]],
+    ) -> tuple[str, str, str] | None:
+        alias = col_ref.get("alias")
+        column = col_ref.get("column")
+        if not alias or not column or alias not in alias_map:
+            return None
+        schema, table = alias_map[alias]
+        return (schema, table, column)
+
+    def _type_category(self, data_type: str) -> str:
+        if data_type in self.NUMERIC_TYPES:
+            return "numeric"
+        if data_type in self.STRING_TYPES:
+            return "string"
+        if data_type in self.BINARY_TYPES:
+            return "binary"
+        return "other"
+
+    def _format_column_ref(self, key: tuple[str, str, str]) -> str:
+        schema, table, column = key
+        return f"{schema}.{table}.{column}"
+
+    def _strip_identifier(self, token: str | None) -> str:
+        if not token:
+            return ""
+        return token.strip("`\"")

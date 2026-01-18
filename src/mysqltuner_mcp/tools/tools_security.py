@@ -683,12 +683,15 @@ Helps identify excessive or missing privileges."""
 
         # Global privileges
         try:
-            global_query = f"""
+            global_query = """
                 SELECT *
                 FROM mysql.user
-                WHERE User = '{username}' AND Host = '{hostname}'
+                WHERE User = %s AND Host = %s
             """
-            global_result = await self.sql_driver.execute_query(global_query)
+            global_result = await self.sql_driver.execute_query(
+                global_query,
+                [username, hostname],
+            )
 
             if global_result:
                 row = global_result[0]
@@ -702,16 +705,19 @@ Helps identify excessive or missing privileges."""
 
         # Database privileges
         try:
-            db_query = f"""
+            db_query = """
                 SELECT Db, Select_priv, Insert_priv, Update_priv, Delete_priv,
                        Create_priv, Drop_priv, Grant_priv, Index_priv, Alter_priv,
                        Create_tmp_table_priv, Lock_tables_priv, Create_view_priv,
                        Show_view_priv, Create_routine_priv, Alter_routine_priv,
                        Execute_priv, Event_priv, Trigger_priv
                 FROM mysql.db
-                WHERE User = '{username}' AND Host = '{hostname}'
+                WHERE User = %s AND Host = %s
             """
-            db_results = await self.sql_driver.execute_query(db_query)
+            db_results = await self.sql_driver.execute_query(
+                db_query,
+                [username, hostname],
+            )
 
             for row in db_results:
                 privs = {k: v for k, v in row.items() if v == "Y" and k != "Db"}
@@ -724,12 +730,15 @@ Helps identify excessive or missing privileges."""
 
         # Table privileges
         try:
-            table_query = f"""
+            table_query = """
                 SELECT Db, Table_name, Table_priv, Column_priv
                 FROM mysql.tables_priv
-                WHERE User = '{username}' AND Host = '{hostname}'
+                WHERE User = %s AND Host = %s
             """
-            table_results = await self.sql_driver.execute_query(table_query)
+            table_results = await self.sql_driver.execute_query(
+                table_query,
+                [username, hostname],
+            )
 
             for row in table_results:
                 user_privs["table_privileges"].append({

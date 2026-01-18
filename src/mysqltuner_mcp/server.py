@@ -72,6 +72,7 @@ from .tools import (
     StatementsSortingToolHandler,
     StatementsFullScansToolHandler,
     StatementErrorsToolHandler,
+    LongQueryTypeCollationIssuesToolHandler,
     # Memory tools
     MemoryCalculationsToolHandler,
     MemoryByHostToolHandler,
@@ -343,6 +344,7 @@ class MySQLTunerServer:
             StatementsSortingToolHandler,
             StatementsFullScansToolHandler,
             StatementErrorsToolHandler,
+            LongQueryTypeCollationIssuesToolHandler,
             # Memory calculation tools
             MemoryCalculationsToolHandler,
             MemoryByHostToolHandler,
