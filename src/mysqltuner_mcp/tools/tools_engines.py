@@ -659,12 +659,15 @@ Based on MySQLTuner's auto-increment analysis."""
                 "bigint": {"signed": 9223372036854775807, "unsigned": 18446744073709551615}
             }
 
-            where_clause = """
-                WHERE TABLE_SCHEMA NOT IN
-                    ('mysql', 'information_schema', 'performance_schema', 'sys')
-            """
+            params: list = []
             if schema_name:
-                where_clause = f"WHERE TABLE_SCHEMA = '{schema_name}'"
+                where_clause = "WHERE t.TABLE_SCHEMA = %s"
+                params = [schema_name]
+            else:
+                where_clause = """
+                    WHERE t.TABLE_SCHEMA NOT IN
+                        ('mysql', 'information_schema', 'performance_schema', 'sys')
+                """
 
             # Get auto_increment columns
             query = f"""
@@ -681,10 +684,12 @@ Based on MySQLTuner's auto-increment analysis."""
                     AND t.TABLE_NAME = c.TABLE_NAME
                 {where_clause}
                     AND t.AUTO_INCREMENT IS NOT NULL
-                    AND c.EXTRA LIKE '%auto_increment%'
+                    AND c.EXTRA LIKE '%%auto_increment%%'
                 ORDER BY t.AUTO_INCREMENT DESC
             """
-            results = await self.sql_driver.execute_query(query)
+            results = await self.sql_driver.execute_query(
+                query, params if params else None
+            )
 
             at_risk_count = 0
 
