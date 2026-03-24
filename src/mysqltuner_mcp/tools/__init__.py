@@ -11,6 +11,8 @@ Contains tool handlers for:
 - Storage engine analysis
 - Replication status
 - Security analysis
+- Diagnostic analysis
+- Schema profiling
 """
 
 from .toolhandler import ToolHandler
@@ -63,6 +65,18 @@ from .tools_security import (
     UserPrivilegesToolHandler,
     AuditLogToolHandler,
 )
+from .tools_diagnostic import (
+    ConnectionAnalysisToolHandler,
+    TableLockAnalysisToolHandler,
+    TempTableAnalysisToolHandler,
+    PerfSchemaConfigToolHandler,
+    OptimizerConfigToolHandler,
+)
+from .tools_schema import (
+    SchemaProfilingToolHandler,
+    BinlogAnalysisToolHandler,
+    GlobalStatusSnapshotToolHandler,
+)
 
 __all__ = [
     # Base
@@ -107,4 +121,14 @@ __all__ = [
     "SecurityAnalysisToolHandler",
     "UserPrivilegesToolHandler",
     "AuditLogToolHandler",
+    # Diagnostic
+    "ConnectionAnalysisToolHandler",
+    "TableLockAnalysisToolHandler",
+    "TempTableAnalysisToolHandler",
+    "PerfSchemaConfigToolHandler",
+    "OptimizerConfigToolHandler",
+    # Schema & Binlog
+    "SchemaProfilingToolHandler",
+    "BinlogAnalysisToolHandler",
+    "GlobalStatusSnapshotToolHandler",
 ]

@@ -46,6 +46,16 @@ from mysqltuner_mcp.tools import (
     SecurityAnalysisToolHandler,
     UserPrivilegesToolHandler,
     AuditLogToolHandler,
+    # Diagnostic tools
+    ConnectionAnalysisToolHandler,
+    TableLockAnalysisToolHandler,
+    TempTableAnalysisToolHandler,
+    PerfSchemaConfigToolHandler,
+    OptimizerConfigToolHandler,
+    # Schema & binlog tools
+    SchemaProfilingToolHandler,
+    BinlogAnalysisToolHandler,
+    GlobalStatusSnapshotToolHandler,
 )
 
 
@@ -1849,6 +1859,16 @@ class TestAnnotations:
             SecurityAnalysisToolHandler(driver),
             UserPrivilegesToolHandler(driver),
             AuditLogToolHandler(driver),
+            # New diagnostic tools
+            ConnectionAnalysisToolHandler(driver),
+            TableLockAnalysisToolHandler(driver),
+            TempTableAnalysisToolHandler(driver),
+            PerfSchemaConfigToolHandler(driver),
+            OptimizerConfigToolHandler(driver),
+            # New schema & binlog tools
+            SchemaProfilingToolHandler(driver),
+            BinlogAnalysisToolHandler(driver),
+            GlobalStatusSnapshotToolHandler(driver),
         ]
 
         for handler in handlers:
@@ -1858,3 +1878,539 @@ class TestAnnotations:
             assert "destructiveHint" in annotations
             assert annotations["readOnlyHint"] is True
             assert annotations["destructiveHint"] is False
+
+
+# =============================================================================
+# Diagnostic Tool Tests
+# =============================================================================
+
+
+class TestConnectionAnalysisToolHandler:
+    """Tests for ConnectionAnalysisToolHandler."""
+
+    def test_tool_definition(self):
+        """Test tool definition."""
+        driver = create_mock_sql_driver()
+        handler = ConnectionAnalysisToolHandler(driver)
+
+        definition = handler.get_tool_definition()
+        assert definition.name == "analyze_connections"
+        assert "inputSchema" in definition.model_dump()
+
+    @pytest.mark.asyncio
+    async def test_run_tool(self):
+        """Test connection analysis with mock data."""
+        driver = create_mock_sql_driver()
+        driver.get_server_status = AsyncMock(return_value={
+            "Threads_connected": "50",
+            "Threads_running": "5",
+            "Threads_cached": "10",
+            "Max_used_connections": "80",
+            "Connections": "10000",
+            "Aborted_clients": "50",
+            "Aborted_connects": "10",
+            "Uptime": "86400",
+        })
+        driver.get_server_variables = AsyncMock(return_value={
+            "max_connections": "151",
+        })
+        driver.execute_query = AsyncMock(return_value=[
+            {
+                "group_key": "Sleep",
+                "connection_count": 40,
+                "sleeping": 40,
+                "active": 0,
+                "max_time_sec": 3600,
+                "avg_time_sec": 120.5,
+            },
+            {
+                "group_key": "Query",
+                "connection_count": 5,
+                "sleeping": 0,
+                "active": 5,
+                "max_time_sec": 10,
+                "avg_time_sec": 2.0,
+            }
+        ])
+
+        handler = ConnectionAnalysisToolHandler(driver)
+        result = await handler.run_tool({"group_by": "state"})
+
+        parsed = json.loads(result[0].text)
+        assert parsed["connection_overview"]["current_connections"] == 50
+        assert parsed["connection_overview"]["max_connections"] == 151
+        assert len(parsed["breakdown"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_run_tool_error(self):
+        """Test error handling."""
+        driver = create_mock_sql_driver()
+        driver.get_server_status = AsyncMock(side_effect=Exception("Connection lost"))
+
+        handler = ConnectionAnalysisToolHandler(driver)
+        result = await handler.run_tool({})
+
+        assert "error" in result[0].text.lower()
+
+
+class TestTableLockAnalysisToolHandler:
+    """Tests for TableLockAnalysisToolHandler."""
+
+    def test_tool_definition(self):
+        """Test tool definition."""
+        driver = create_mock_sql_driver()
+        handler = TableLockAnalysisToolHandler(driver)
+
+        definition = handler.get_tool_definition()
+        assert definition.name == "analyze_table_locks"
+
+    @pytest.mark.asyncio
+    async def test_run_tool(self):
+        """Test table lock analysis with mock data."""
+        driver = create_mock_sql_driver()
+        driver.get_server_status = AsyncMock(return_value={
+            "Table_locks_waited": "100",
+            "Table_locks_immediate": "50000",
+            "Innodb_row_lock_waits": "500",
+            "Innodb_row_lock_time_avg": "50",
+            "Innodb_row_lock_time": "25000",
+            "Innodb_row_lock_current_waits": "0",
+        })
+        driver.get_server_variables = AsyncMock(return_value={
+            "lock_wait_timeout": "31536000",
+            "innodb_lock_wait_timeout": "50",
+        })
+        driver.execute_query = AsyncMock(side_effect=[
+            # table_lock_waits_summary_by_table
+            [
+                {
+                    "OBJECT_SCHEMA": "mydb",
+                    "OBJECT_NAME": "orders",
+                    "read_locks": 5000,
+                    "write_locks": 1000,
+                    "read_normal": 4000,
+                    "write_allow_write": 500,
+                    "total_wait_ms": 1200.5,
+                    "read_wait_ms": 800.0,
+                    "write_wait_ms": 400.5,
+                }
+            ],
+            # metadata_locks
+            [
+                {
+                    "OBJECT_SCHEMA": "mydb",
+                    "OBJECT_NAME": "orders",
+                    "OBJECT_TYPE": "TABLE",
+                    "LOCK_TYPE": "SHARED_READ",
+                    "LOCK_DURATION": "TRANSACTION",
+                    "LOCK_STATUS": "GRANTED",
+                    "OWNER_THREAD_ID": 42,
+                }
+            ],
+        ])
+
+        handler = TableLockAnalysisToolHandler(driver)
+        result = await handler.run_tool({})
+
+        parsed = json.loads(result[0].text)
+        assert parsed["lock_overview"]["table_locks_waited"] == 100
+        assert len(parsed["table_lock_waits"]) == 1
+        assert parsed["table_lock_waits"][0]["table"] == "orders"
+
+
+class TestTempTableAnalysisToolHandler:
+    """Tests for TempTableAnalysisToolHandler."""
+
+    def test_tool_definition(self):
+        """Test tool definition."""
+        driver = create_mock_sql_driver()
+        handler = TempTableAnalysisToolHandler(driver)
+
+        definition = handler.get_tool_definition()
+        assert definition.name == "analyze_temp_tables"
+
+    @pytest.mark.asyncio
+    async def test_run_tool(self):
+        """Test temp table analysis with mock data."""
+        driver = create_mock_sql_driver()
+        driver.get_server_status = AsyncMock(return_value={
+            "Created_tmp_tables": "10000",
+            "Created_tmp_disk_tables": "3000",
+            "Created_tmp_files": "50",
+        })
+        driver.get_server_variables = AsyncMock(return_value={
+            "tmp_table_size": "67108864",
+            "max_heap_table_size": "67108864",
+            "internal_tmp_mem_storage_engine": "TempTable",
+            "tmpdir": "/tmp",
+        })
+        driver.execute_query = AsyncMock(return_value=[
+            {
+                "DIGEST_TEXT": "SELECT `col1`, COUNT(*) FROM `t1` GROUP BY `col1`",
+                "exec_count": 500,
+                "tmp_tables": 500,
+                "disk_tmp_tables": 200,
+                "disk_pct": 40.0,
+                "total_time_sec": 12.5,
+                "SCHEMA_NAME": "mydb",
+            }
+        ])
+
+        handler = TempTableAnalysisToolHandler(driver)
+        result = await handler.run_tool({"top_n": 10})
+
+        parsed = json.loads(result[0].text)
+        assert parsed["overview"]["disk_tmp_pct"] == 30.0
+        assert parsed["configuration"]["tmp_table_size_mb"] == 64.0
+        assert len(parsed["top_disk_temp_queries"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_run_tool_high_disk_pct(self):
+        """Test recommendations for high disk temp table percentage."""
+        driver = create_mock_sql_driver()
+        driver.get_server_status = AsyncMock(return_value={
+            "Created_tmp_tables": "10000",
+            "Created_tmp_disk_tables": "5000",
+            "Created_tmp_files": "100",
+        })
+        driver.get_server_variables = AsyncMock(return_value={
+            "tmp_table_size": "16777216",
+            "max_heap_table_size": "33554432",
+            "internal_tmp_mem_storage_engine": "TempTable",
+            "tmpdir": "/tmp",
+        })
+        driver.execute_query = AsyncMock(return_value=[])
+
+        handler = TempTableAnalysisToolHandler(driver)
+        result = await handler.run_tool({})
+
+        parsed = json.loads(result[0].text)
+        assert parsed["overview"]["disk_tmp_pct"] == 50.0
+        assert len(parsed["recommendations"]) > 0
+        # Should recommend aligning tmp_table_size and max_heap_table_size
+        recs_text = " ".join(parsed["recommendations"])
+        assert "differ" in recs_text.lower() or "disk" in recs_text.lower()
+
+
+class TestPerfSchemaConfigToolHandler:
+    """Tests for PerfSchemaConfigToolHandler."""
+
+    def test_tool_definition(self):
+        """Test tool definition."""
+        driver = create_mock_sql_driver()
+        handler = PerfSchemaConfigToolHandler(driver)
+
+        definition = handler.get_tool_definition()
+        assert definition.name == "check_perf_schema_config"
+
+    @pytest.mark.asyncio
+    async def test_run_tool_enabled(self):
+        """Test with performance_schema enabled."""
+        driver = create_mock_sql_driver()
+        driver.get_server_variables = AsyncMock(return_value={
+            "performance_schema": "ON",
+        })
+        driver.get_server_status = AsyncMock(return_value={
+            "Performance_schema_memory": "104857600",
+        })
+        driver.execute_query = AsyncMock(side_effect=[
+            # setup_instruments
+            [
+                {"category": "statement/sql", "total": 100, "enabled": 80, "timed": 80},
+                {"category": "wait/io", "total": 50, "enabled": 40, "timed": 40},
+                {"category": "stage/sql", "total": 30, "enabled": 0, "timed": 0},
+                {"category": "memory/sql", "total": 20, "enabled": 10, "timed": 0},
+            ],
+            # setup_consumers
+            [
+                {"NAME": "events_statements_current", "ENABLED": "YES"},
+                {"NAME": "events_statements_history", "ENABLED": "YES"},
+                {"NAME": "events_waits_current", "ENABLED": "YES"},
+                {"NAME": "events_waits_history", "ENABLED": "NO"},
+            ],
+        ])
+
+        handler = PerfSchemaConfigToolHandler(driver)
+        result = await handler.run_tool({})
+
+        parsed = json.loads(result[0].text)
+        assert parsed["performance_schema_enabled"] is True
+        assert parsed["memory_usage"]["total_mb"] == 100.0
+        assert parsed["tool_readiness"]["slow_query_analysis"] is True
+
+    @pytest.mark.asyncio
+    async def test_run_tool_disabled(self):
+        """Test with performance_schema disabled."""
+        driver = create_mock_sql_driver()
+        driver.get_server_variables = AsyncMock(return_value={
+            "performance_schema": "OFF",
+        })
+        driver.get_server_status = AsyncMock(return_value={})
+
+        handler = PerfSchemaConfigToolHandler(driver)
+        result = await handler.run_tool({})
+
+        parsed = json.loads(result[0].text)
+        assert parsed["performance_schema_enabled"] is False
+        assert len(parsed["recommendations"]) > 0
+        assert parsed["tool_readiness"]["slow_query_analysis"] is False
+
+
+class TestOptimizerConfigToolHandler:
+    """Tests for OptimizerConfigToolHandler."""
+
+    def test_tool_definition(self):
+        """Test tool definition."""
+        driver = create_mock_sql_driver()
+        handler = OptimizerConfigToolHandler(driver)
+
+        definition = handler.get_tool_definition()
+        assert definition.name == "review_optimizer_config"
+
+    @pytest.mark.asyncio
+    async def test_run_tool(self):
+        """Test optimizer config review."""
+        driver = create_mock_sql_driver()
+        driver.get_server_variables = AsyncMock(return_value={
+            "optimizer_switch": "index_merge=on,index_merge_union=on,mrr=off,batched_key_access=off,derived_merge=on",
+            "optimizer_search_depth": "62",
+            "optimizer_prune_level": "1",
+            "optimizer_trace": "enabled=off",
+            "optimizer_trace_max_mem_size": "1048576",
+            "eq_range_index_dive_limit": "200",
+            "range_optimizer_max_mem_size": "8388608",
+            "max_join_size": "18446744073709551615",
+            "join_buffer_size": "262144",
+            "sort_buffer_size": "262144",
+            "read_rnd_buffer_size": "262144",
+        })
+        # Cost model query may fail (MySQL 5.7)
+        driver.execute_query = AsyncMock(side_effect=Exception("Table not found"))
+
+        handler = OptimizerConfigToolHandler(driver)
+        result = await handler.run_tool({"include_cost_model": True})
+
+        parsed = json.loads(result[0].text)
+        assert parsed["optimizer_switches"]["index_merge"] == "on"
+        assert parsed["optimizer_switches"]["mrr"] == "off"
+        assert parsed["key_settings"]["optimizer_search_depth"] == "62"
+        # Should recommend MRR and BKA
+        recs_text = " ".join(parsed["recommendations"])
+        assert "mrr" in recs_text.lower() or "Multi-Range" in recs_text
+
+    @pytest.mark.asyncio
+    async def test_run_tool_with_cost_model(self):
+        """Test optimizer config with cost model available."""
+        driver = create_mock_sql_driver()
+        driver.get_server_variables = AsyncMock(return_value={
+            "optimizer_switch": "index_merge=on,derived_merge=on,mrr=on,batched_key_access=on",
+            "optimizer_search_depth": "62",
+            "optimizer_prune_level": "1",
+        })
+        driver.execute_query = AsyncMock(side_effect=[
+            # server_cost
+            [{"cost_name": "disk_temptable_create_cost", "cost_value": None, "default_value": 20.0}],
+            # engine_cost
+            [{"engine_name": "default", "cost_name": "io_block_read_cost", "cost_value": None, "default_value": 1.0}],
+        ])
+
+        handler = OptimizerConfigToolHandler(driver)
+        result = await handler.run_tool({"include_cost_model": True})
+
+        parsed = json.loads(result[0].text)
+        assert "server_cost" in parsed["cost_model"]
+        assert "engine_cost" in parsed["cost_model"]
+
+
+# =============================================================================
+# Schema & Binlog Tool Tests
+# =============================================================================
+
+
+class TestSchemaProfilingToolHandler:
+    """Tests for SchemaProfilingToolHandler."""
+
+    def test_tool_definition(self):
+        """Test tool definition."""
+        driver = create_mock_sql_driver()
+        handler = SchemaProfilingToolHandler(driver)
+
+        definition = handler.get_tool_definition()
+        assert definition.name == "profile_schema_sizes"
+
+    @pytest.mark.asyncio
+    async def test_run_tool(self):
+        """Test schema profiling with mock data."""
+        driver = create_mock_sql_driver()
+        driver.execute_query = AsyncMock(side_effect=[
+            # Database sizes
+            [
+                {
+                    "db_name": "myapp",
+                    "table_count": 25,
+                    "data_size": 1073741824,
+                    "index_size": 536870912,
+                    "total_size": 1610612736,
+                    "free_space": 104857600,
+                    "total_rows": 5000000,
+                }
+            ],
+            # Largest tables
+            [
+                {
+                    "TABLE_SCHEMA": "myapp",
+                    "TABLE_NAME": "events",
+                    "ENGINE": "InnoDB",
+                    "TABLE_ROWS": 3000000,
+                    "AVG_ROW_LENGTH": 256,
+                    "DATA_LENGTH": 768000000,
+                    "INDEX_LENGTH": 384000000,
+                    "total_size": 1152000000,
+                    "DATA_FREE": 50000000,
+                }
+            ],
+        ])
+
+        handler = SchemaProfilingToolHandler(driver)
+        result = await handler.run_tool({"top_n": 10})
+
+        parsed = json.loads(result[0].text)
+        assert len(parsed["database_sizes"]) == 1
+        assert parsed["database_sizes"][0]["database"] == "myapp"
+        assert len(parsed["largest_tables"]) == 1
+        assert parsed["largest_tables"][0]["table"] == "events"
+        assert parsed["summary"]["total_databases"] == 1
+
+
+class TestBinlogAnalysisToolHandler:
+    """Tests for BinlogAnalysisToolHandler."""
+
+    def test_tool_definition(self):
+        """Test tool definition."""
+        driver = create_mock_sql_driver()
+        handler = BinlogAnalysisToolHandler(driver)
+
+        definition = handler.get_tool_definition()
+        assert definition.name == "analyze_binlog"
+
+    @pytest.mark.asyncio
+    async def test_run_tool_enabled(self):
+        """Test with binary logging enabled."""
+        driver = create_mock_sql_driver()
+        driver.get_server_variables = AsyncMock(return_value={
+            "log_bin": "ON",
+            "binlog_format": "ROW",
+            "binlog_row_image": "FULL",
+            "sync_binlog": "1",
+            "binlog_cache_size": "32768",
+            "max_binlog_size": "1073741824",
+            "binlog_expire_logs_seconds": "604800",
+            "gtid_mode": "ON",
+            "enforce_gtid_consistency": "ON",
+        })
+        driver.get_server_status = AsyncMock(return_value={
+            "Binlog_cache_use": "5000",
+            "Binlog_cache_disk_use": "50",
+            "Binlog_bytes_written": "1073741824",
+            "Uptime": "86400",
+        })
+        driver.execute_query = AsyncMock(return_value=[
+            {"Log_name": "binlog.000001", "File_size": 536870912},
+            {"Log_name": "binlog.000002", "File_size": 268435456},
+        ])
+
+        handler = BinlogAnalysisToolHandler(driver)
+        result = await handler.run_tool({})
+
+        parsed = json.loads(result[0].text)
+        assert parsed["binlog_enabled"] is True
+        assert parsed["configuration"]["binlog_format"] == "ROW"
+        assert len(parsed["binlog_files"]) == 2
+        assert parsed["throughput"]["total_binlog_files"] == 2
+
+    @pytest.mark.asyncio
+    async def test_run_tool_disabled(self):
+        """Test with binary logging disabled."""
+        driver = create_mock_sql_driver()
+        driver.get_server_variables = AsyncMock(return_value={
+            "log_bin": "OFF",
+        })
+        driver.get_server_status = AsyncMock(return_value={})
+
+        handler = BinlogAnalysisToolHandler(driver)
+        result = await handler.run_tool({})
+
+        parsed = json.loads(result[0].text)
+        assert parsed["binlog_enabled"] is False
+        assert len(parsed["recommendations"]) > 0
+
+
+class TestGlobalStatusSnapshotToolHandler:
+    """Tests for GlobalStatusSnapshotToolHandler."""
+
+    def test_tool_definition(self):
+        """Test tool definition."""
+        driver = create_mock_sql_driver()
+        handler = GlobalStatusSnapshotToolHandler(driver)
+
+        definition = handler.get_tool_definition()
+        assert definition.name == "get_global_status_snapshot"
+
+    @pytest.mark.asyncio
+    async def test_run_tool_all(self):
+        """Test global status snapshot with all categories."""
+        driver = create_mock_sql_driver()
+        driver.get_server_status = AsyncMock(return_value={
+            "Uptime": "86400",
+            "Questions": "1000000",
+            "Queries": "1000000",
+            "Com_select": "600000",
+            "Com_insert": "200000",
+            "Com_update": "150000",
+            "Com_delete": "50000",
+            "Slow_queries": "100",
+            "Threads_connected": "50",
+            "Threads_running": "5",
+            "Bytes_received": "5368709120",
+            "Bytes_sent": "10737418240",
+            "Innodb_buffer_pool_reads": "1000",
+            "Innodb_buffer_pool_read_requests": "10000000",
+            "Handler_read_key": "5000000",
+            "Handler_read_rnd_next": "2000000",
+        })
+
+        handler = GlobalStatusSnapshotToolHandler(driver)
+        result = await handler.run_tool({"category": "all"})
+
+        parsed = json.loads(result[0].text)
+        assert parsed["uptime_seconds"] == 86400
+        assert "Questions" in parsed["counters"]
+        assert "Com_select" in parsed["counters"]
+        assert "Questions" in parsed["rates_per_second"]
+        assert parsed["computed"]["read_pct"] == 60.0
+
+    @pytest.mark.asyncio
+    async def test_run_tool_throughput_only(self):
+        """Test snapshot with throughput category only."""
+        driver = create_mock_sql_driver()
+        driver.get_server_status = AsyncMock(return_value={
+            "Uptime": "3600",
+            "Questions": "50000",
+            "Queries": "50000",
+            "Com_select": "40000",
+            "Com_insert": "5000",
+            "Com_update": "3000",
+            "Com_delete": "2000",
+            "Slow_queries": "5",
+            "Bytes_received": "1073741824",
+            "Bytes_sent": "2147483648",
+        })
+
+        handler = GlobalStatusSnapshotToolHandler(driver)
+        result = await handler.run_tool({"category": "throughput"})
+
+        parsed = json.loads(result[0].text)
+        assert "Questions" in parsed["counters"]
+        assert "Com_select" in parsed["counters"]
+        # Should NOT include handler keys
+        assert "Handler_read_key" not in parsed["counters"]
