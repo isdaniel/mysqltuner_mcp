@@ -59,8 +59,20 @@ User's problem → What type of issue?
     ├─ Security audit ─────────────────────────→ Security Analysis
     │   Start: analyze_security → analyze_user_privileges
     │
-    └─ Health check / monitoring ──────────────→ Quick Health
-        Start: check_database_health → get_global_status_snapshot
+    ├─ Health check / monitoring ──────────────→ Quick Health
+    │   Start: check_database_health → get_global_status_snapshot
+    │
+    ├─ Table maintenance / fragmentation ─────→ Maintenance
+    │   Start: get_fragmented_tables → profile_schema_sizes → analyze_auto_increment
+    │   Reference: [common-problems.md] "Table Fragmentation", [advanced-diagnostics.md] "Table Maintenance"
+    │
+    ├─ DDL stuck / metadata lock ─────────────→ Metadata Lock Diagnosis
+    │   Start: analyze_table_locks → get_active_queries → analyze_innodb_transactions
+    │   Reference: [common-problems.md] "Metadata Lock Blocking DDL"
+    │
+    └─ Advanced / beyond MCP tools ───────────→ Raw SQL Diagnosis
+        Reference: [tsg-diagnostic-queries.md], [advanced-diagnostics.md]
+        Covers: optimizer trace, errant GTIDs, DEFINER audits, delta comparison
 ```
 
 ---
@@ -190,6 +202,8 @@ Load these as needed for deeper guidance:
 - **[reference/tool-reference.md](./reference/tool-reference.md)** - Quick reference card for all 39 MCP tools organized by category, with descriptions and key use cases
 - **[reference/common-problems.md](./reference/common-problems.md)** - Symptom-to-solution mapping for the most common MySQL performance problems, with exact tool sequences for each
 - **[reference/configuration-recommendations.md](./reference/configuration-recommendations.md)** - Specific MySQL configuration values and formulas for different workload types (OLTP, OLAP, mixed), organized by category
+- **[reference/tsg-diagnostic-queries.md](./reference/tsg-diagnostic-queries.md)** - Diagnostic SQL queries from TSGs mapped to MCP tools, parameter tuning matrix, and raw SQL for scenarios beyond tool coverage
+- **[reference/advanced-diagnostics.md](./reference/advanced-diagnostics.md)** - Advanced techniques: optimizer trace, table maintenance, schema change impact, error log patterns, historical delta comparison, security deep dive, replication advanced troubleshooting
 
 ---
 
@@ -202,3 +216,22 @@ Load these as needed for deeper guidance:
 - Warn about changes that require a MySQL restart vs those that can be set dynamically
 - For production servers, recommend testing changes on staging first
 - If the health score is critical (<50), focus on the top 1-2 issues rather than doing a comprehensive audit
+
+---
+
+## When to Go Beyond MCP Tools
+
+The 39 MCP tools cover live performance diagnostics comprehensively. For these scenarios, use raw SQL from the reference files:
+
+| Scenario | Reference File | Key Technique |
+|----------|---------------|---------------|
+| EXPLAIN doesn't explain bad plan choice | [advanced-diagnostics.md](./reference/advanced-diagnostics.md) | Optimizer trace |
+| Need to compare metrics over time | [tsg-diagnostic-queries.md](./reference/tsg-diagnostic-queries.md) | Global status delta comparison |
+| Table maintenance after bulk operations | [advanced-diagnostics.md](./reference/advanced-diagnostics.md) | ANALYZE / OPTIMIZE / CHECK TABLE |
+| DDL stuck on metadata lock | [common-problems.md](./reference/common-problems.md) | Metadata lock diagnosis |
+| Security audit of DEFINERs / routines | [advanced-diagnostics.md](./reference/advanced-diagnostics.md) | DEFINER / SQL SECURITY audit |
+| Replication errant GTIDs | [advanced-diagnostics.md](./reference/advanced-diagnostics.md) | GTID_SUBTRACT comparison |
+| Parallel replication not parallelizing | [tsg-diagnostic-queries.md](./reference/tsg-diagnostic-queries.md) | Worker utilization + missing PK check |
+| InnoDB purge lag / undo growth | [common-problems.md](./reference/common-problems.md) | Purge lag diagnosis |
+| InnoDB mutex contention | [advanced-diagnostics.md](./reference/advanced-diagnostics.md) | SHOW ENGINE INNODB MUTEX |
+| Histogram statistics for better plans | [advanced-diagnostics.md](./reference/advanced-diagnostics.md) | ANALYZE TABLE ... UPDATE HISTOGRAM |

@@ -14,7 +14,11 @@ Symptom-to-solution mapping for the most frequent MySQL performance issues. Each
 6. [High CPU Usage](#high-cpu-usage)
 7. [Memory Pressure / OOM Kills](#memory-pressure)
 8. [Temp Table Disk Spills](#temp-table-disk-spills)
-9. [Slow Specific Query](#slow-specific-query)
+9. [InnoDB Purge Lag](#innodb-purge-lag)
+10. [Table Fragmentation and Storage Reclamation](#table-fragmentation-and-storage-reclamation)
+11. [Metadata Lock Blocking DDL](#metadata-lock-blocking-ddl)
+12. [Implicit Type Conversion in Queries](#implicit-type-conversion-in-queries)
+13. [Slow Specific Query](#slow-specific-query)
 
 ---
 
@@ -277,6 +281,130 @@ Step 3: review_settings (category: "memory")
 **Key insight**: The effective temp table size limit is `MIN(tmp_table_size, max_heap_table_size)`. Set them to the same value (64M-256M depending on workload).
 
 Queries with BLOB/TEXT columns **always** create on-disk temp tables regardless of these settings. The only fix is to rewrite the query or avoid selecting BLOB/TEXT columns when doing GROUP BY.
+
+---
+
+## InnoDB Purge Lag
+
+**Symptoms**: Undo history length growing (visible in `SHOW ENGINE INNODB STATUS` as "History list length > 10000"), increasing undo tablespace size, potential performance degradation from long MVCC chains.
+
+**Diagnostic sequence**:
+
+```
+Step 1: get_innodb_status
+        → Check "History list length" — values > 10000 indicate purge lag
+
+Step 2: analyze_innodb_transactions
+        → Find long-running transactions preventing purge
+
+Step 3: get_active_queries (include_sleeping: true)
+        → Identify idle-in-transaction sessions holding read views
+
+Step 4: review_settings (category: "innodb")
+        → Check innodb_purge_threads, innodb_max_purge_lag
+```
+
+**Common findings and fixes**:
+
+| Finding | Fix |
+|---------|-----|
+| Long-running transaction (hours old) | Kill the idle transaction or fix the application to commit promptly |
+| Monitoring tool holding open transaction | Configure monitoring to use autocommit or short-lived connections |
+| innodb_purge_threads = 1 | Increase to 4 (default in MySQL 8.0) for faster purge |
+| innodb_max_purge_lag = 0 | Set to 1000000 to throttle DML when purge falls behind |
+
+---
+
+## Table Fragmentation and Storage Reclamation
+
+**Symptoms**: Disk usage higher than expected, `DATA_FREE` in information_schema.TABLES shows large values, storage not freed after mass DELETE.
+
+**Diagnostic sequence**:
+
+```
+Step 1: get_fragmented_tables
+        → Identify tables with high fragmentation percentage
+
+Step 2: profile_schema_sizes
+        → Compare data size vs total allocated size per table
+
+Step 3: analyze_binlog
+        → Check if binlog accumulation is the real space consumer
+```
+
+**Common findings and fixes**:
+
+| Finding | Fix |
+|---------|-----|
+| High DATA_FREE on specific tables | `ALTER TABLE t ENGINE=InnoDB;` (online rebuild) during maintenance window |
+| Space not freed after DELETE | InnoDB doesn't return space to OS — must rebuild table |
+| ibdata1 growing (shared tablespace) | Migrate to `innodb_file_per_table=ON`, then dump and reload |
+| Binlog accumulation | Set `binlog_expire_logs_seconds = 604800` (7 days) |
+
+> Always run `ANALYZE TABLE` after `OPTIMIZE TABLE` or `ALTER TABLE ... ENGINE=InnoDB` to update index statistics.
+
+---
+
+## Metadata Lock Blocking DDL
+
+**Symptoms**: `ALTER TABLE` or `CREATE INDEX` hangs indefinitely, other queries on the same table queue up, application timeouts cascade.
+
+**Diagnostic sequence**:
+
+```
+Step 1: analyze_table_locks
+        → Check metadata lock details
+
+Step 2: get_active_queries (include_sleeping: true)
+        → Find the session holding the blocking metadata lock
+
+Step 3: analyze_innodb_transactions
+        → Find uncommitted transactions on the target table
+
+Step 4: analyze_connections (group_by: "state")
+        → Look for "Waiting for table metadata lock" state
+```
+
+**Common findings and fixes**:
+
+| Finding | Fix |
+|---------|-----|
+| Long-running SELECT holds shared lock | Wait for it to finish, or KILL the session |
+| Uncommitted transaction (even if idle) | KILL the sleeping session holding the transaction |
+| Many queries queued behind DDL | Cancel the DDL, fix the blocker first, then retry DDL |
+| Repeated DDL timeouts | Use `lock_wait_timeout` to limit DDL wait, schedule during low traffic |
+
+**Key insight**: Metadata locks follow a queue. Once a DDL (exclusive lock) enters the queue, ALL subsequent queries on that table also queue behind it. This is why a single idle transaction can cause cascading timeouts.
+
+---
+
+## Implicit Type Conversion in Queries
+
+**Symptoms**: Query is slow despite having an index on the WHERE column. EXPLAIN shows full table scan or index not used. The column type doesn't match the comparison value type.
+
+**Diagnostic sequence**:
+
+```
+Step 1: analyze_long_queries_for_type_collation_issues
+        → Detect implicit conversions and collation mismatches
+
+Step 2: analyze_query (query: "<the SQL>", format: "json")
+        → EXPLAIN shows "Using where" but not "Using index condition"
+
+Step 3: get_index_stats (schema: "<schema>", table_name: "<table>")
+        → Verify index exists on the column
+```
+
+**Common patterns**:
+
+| Pattern | Why It's Slow | Fix |
+|---------|--------------|-----|
+| `WHERE varchar_col = 12345` | Numeric comparison on VARCHAR forces scan | Use string: `WHERE varchar_col = '12345'` |
+| `WHERE int_col = '12345'` | String-to-int conversion (less harmful but still bad practice) | Use int: `WHERE int_col = 12345` |
+| `JOIN ON a.col = b.col` with different charsets | Collation mismatch forces conversion | Align charsets/collations on both columns |
+| `WHERE YEAR(date_col) = 2024` | Function on column prevents index use | Rewrite: `WHERE date_col >= '2024-01-01' AND date_col < '2025-01-01'` |
+
+For more diagnostic SQL, see [reference/tsg-diagnostic-queries.md](./tsg-diagnostic-queries.md).
 
 ---
 

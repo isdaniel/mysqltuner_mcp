@@ -339,6 +339,119 @@ max_heap_table_size = 128M
 
 ---
 
+## Advanced Configuration
+
+### Optimizer Trace Setup
+
+Enable optimizer trace per-session to diagnose plan selection. Never enable globally in production.
+
+```ini
+# Per-session only:
+SET optimizer_trace = "enabled=on";
+SET optimizer_trace_max_mem_size = 1048576;  -- 1MB for complex queries
+# Run your query, then:
+SELECT * FROM information_schema.OPTIMIZER_TRACE\G
+SET optimizer_trace = "enabled=off";
+```
+
+See [advanced-diagnostics.md](./advanced-diagnostics.md) for detailed optimizer trace analysis.
+
+### Performance Schema Memory Instruments
+
+Enable memory instrumentation when diagnosing memory consumers:
+
+```ini
+# Enable memory instruments (dynamic, takes effect for new allocations only)
+UPDATE performance_schema.setup_instruments
+SET ENABLED = 'YES', TIMED = 'YES'
+WHERE NAME LIKE 'memory/%';
+
+# Key memory summary views:
+# - memory_summary_global_by_event_name (top memory consumers)
+# - memory_summary_by_thread_by_event_name (per-thread)
+# - memory_summary_by_account_by_event_name (per-user)
+```
+
+> **Impact**: Memory instrumentation adds ~5% overhead. Enable selectively (e.g., `memory/innodb/%` only) for long-term monitoring.
+
+### Cost Model Tuning
+
+MySQL 8.0 cost model can be adjusted for SSD vs HDD and buffer pool hit rate:
+
+```ini
+# Check current cost model:
+SELECT * FROM mysql.server_cost;
+SELECT * FROM mysql.engine_cost;
+
+# For SSD storage (lower random I/O cost):
+UPDATE mysql.engine_cost
+SET cost_value = 1.0
+WHERE cost_name = 'io_block_read_cost';
+
+# For large buffer pool with high hit rate:
+UPDATE mysql.engine_cost
+SET cost_value = 0.25
+WHERE cost_name = 'memory_block_read_cost';
+
+FLUSH OPTIMIZER_COSTS;
+```
+
+| Scenario | io_block_read_cost | memory_block_read_cost |
+|----------|-------------------|----------------------|
+| HDD storage | 1.0 (default) | 0.25 (default) |
+| SSD storage | 0.5 - 1.0 | 0.25 |
+| Large buffer pool (>80% hit) | 1.0 | 0.1 |
+| Tiny buffer pool (<60% hit) | 1.0 | 0.5 |
+
+### InnoDB Purge Configuration
+
+Control how aggressively InnoDB purges obsolete MVCC versions:
+
+```ini
+# Number of purge threads (MySQL 8.0 default: 4)
+innodb_purge_threads = 4
+
+# Maximum undo log history length before throttling DML
+innodb_max_purge_lag = 0            # Default: 0 (no throttle)
+# Recommendation for high-write workloads:
+innodb_max_purge_lag = 1000000      # Throttle DML when history > 1M
+
+# Delay per transaction in microseconds when purge lag exceeds threshold
+innodb_max_purge_lag_delay = 0      # Default: 0
+# Recommendation:
+innodb_max_purge_lag_delay = 300000 # Max 300ms delay per transaction
+```
+
+**When to tune purge**: Check `SHOW ENGINE INNODB STATUS` → History list length. If consistently > 10000, increase purge threads or set max_purge_lag to prevent unbounded growth.
+
+### Adaptive Hash Index (AHI) Guidance
+
+AHI is an in-memory structure that can accelerate point lookups but may cause contention:
+
+```ini
+# Check AHI status:
+SHOW GLOBAL STATUS LIKE 'Innodb_adaptive_hash%';
+
+# AHI hit rate:
+# hit_rate = searches / (searches + non_searches)
+# If hit rate < 50%, AHI is consuming memory without benefit
+
+# Disable AHI (dynamic, takes effect immediately):
+SET GLOBAL innodb_adaptive_hash_index = OFF;
+
+# Partitions (reduces contention on multi-core, default: 8):
+# innodb_adaptive_hash_index_parts = 8  (static, requires restart)
+```
+
+| Condition | Recommendation |
+|-----------|---------------|
+| AHI hit rate > 80%, low contention | Keep enabled (default) |
+| AHI hit rate < 50% | Disable — saves memory, reduces mutex waits |
+| Many concurrent point lookups | Increase innodb_adaptive_hash_index_parts to 16 |
+| Range scans dominate workload | Disable — AHI doesn't help range scans |
+
+---
+
 ## Reporting Format
 
 When recommending configuration changes, use this format for clarity:
