@@ -72,6 +72,7 @@ from .tools import (
     StatementsSortingToolHandler,
     StatementsFullScansToolHandler,
     StatementErrorsToolHandler,
+    LongQueryTypeCollationIssuesToolHandler,
     # Memory tools
     MemoryCalculationsToolHandler,
     MemoryByHostToolHandler,
@@ -88,6 +89,16 @@ from .tools import (
     SecurityAnalysisToolHandler,
     UserPrivilegesToolHandler,
     AuditLogToolHandler,
+    # Diagnostic tools
+    ConnectionAnalysisToolHandler,
+    TableLockAnalysisToolHandler,
+    TempTableAnalysisToolHandler,
+    PerfSchemaConfigToolHandler,
+    OptimizerConfigToolHandler,
+    # Schema & binlog tools
+    SchemaProfilingToolHandler,
+    BinlogAnalysisToolHandler,
+    GlobalStatusSnapshotToolHandler,
     # Base class
     ToolHandler,
 )
@@ -343,6 +354,7 @@ class MySQLTunerServer:
             StatementsSortingToolHandler,
             StatementsFullScansToolHandler,
             StatementErrorsToolHandler,
+            LongQueryTypeCollationIssuesToolHandler,
             # Memory calculation tools
             MemoryCalculationsToolHandler,
             MemoryByHostToolHandler,
@@ -359,6 +371,16 @@ class MySQLTunerServer:
             SecurityAnalysisToolHandler,
             UserPrivilegesToolHandler,
             AuditLogToolHandler,
+            # Diagnostic tools
+            ConnectionAnalysisToolHandler,
+            TableLockAnalysisToolHandler,
+            TempTableAnalysisToolHandler,
+            PerfSchemaConfigToolHandler,
+            OptimizerConfigToolHandler,
+            # Schema & binlog tools
+            SchemaProfilingToolHandler,
+            BinlogAnalysisToolHandler,
+            GlobalStatusSnapshotToolHandler,
         ]
 
         for tool_class in tool_classes:
@@ -411,7 +433,33 @@ class MySQLTunerServer:
                 name="performance_audit",
                 description="Full performance audit of MySQL server",
                 arguments=[]
-            )
+            ),
+            Prompt(
+                name="connection_tuning",
+                description="Analyze and tune MySQL connection settings",
+                arguments=[]
+            ),
+            Prompt(
+                name="innodb_deep_dive",
+                description="Deep-dive analysis of InnoDB internals",
+                arguments=[]
+            ),
+            Prompt(
+                name="lock_contention_diagnosis",
+                description="Diagnose lock contention and blocking issues",
+                arguments=[]
+            ),
+            Prompt(
+                name="capacity_planning",
+                description="Capacity planning analysis for MySQL server",
+                arguments=[
+                    PromptArgument(
+                        name="growth_period",
+                        description="Planning period (e.g., '6months', '1year')",
+                        required=False
+                    )
+                ]
+            ),
         ]
 
     async def _get_prompt_result(self, name: str, arguments: dict[str, str]) -> GetPromptResult:
@@ -493,25 +541,185 @@ Please:
 
         elif name == "performance_audit":
             context = """You are a MySQL performance expert conducting a full audit.
+Read the mysql://tuner/perf-tuning-workflow resource first for the recommended methodology.
 
-Please perform a comprehensive performance audit:
-1. Use check_database_health for overall health assessment
-2. Use review_settings to analyze configuration
-3. Use get_slow_queries to identify problematic queries
-4. Use find_unused_indexes to find index issues
-5. Use analyze_wait_events to identify bottlenecks
-6. Use get_table_stats for table-level analysis
+Please perform a comprehensive performance audit using this sequence:
+
+Phase 1 - Prerequisites:
+1. Use check_perf_schema_config to verify performance_schema is properly configured
+
+Phase 2 - Overall Health:
+2. Use check_database_health for overall health scoring
+3. Use review_settings to analyze configuration against best practices
+4. Use calculate_memory_usage to check memory allocation vs physical RAM
+
+Phase 3 - Query Analysis:
+5. Use get_slow_queries to find the most expensive queries
+6. Use get_statements_with_full_scans for queries doing full table scans
+7. Use get_statements_with_temp_tables for disk temp table spills
+8. Use get_statements_with_sorting for expensive sorts
+
+Phase 4 - Index & Schema:
+9. Use find_unused_indexes to find wasted indexes
+10. Use get_index_recommendations to suggest missing indexes
+11. Use profile_schema_sizes to understand data distribution
+
+Phase 5 - InnoDB & Locks:
+12. Use analyze_buffer_pool for buffer pool efficiency
+13. Use analyze_wait_events to identify bottlenecks
+14. Use analyze_table_locks for lock contention
+15. Use get_innodb_status for InnoDB internals
+
+Phase 6 - Connections & Resources:
+16. Use analyze_connections for connection state analysis
+17. Use analyze_temp_tables for temp table optimization
+18. Use get_global_status_snapshot for throughput baseline
+
+Phase 7 - Security & Replication:
+19. Use analyze_security for security posture
+20. Use get_replication_status if applicable
 
 Provide a detailed report with:
-- Executive summary
+- Executive summary with health score
 - Critical issues requiring immediate attention
-- Performance bottlenecks identified
-- Index optimization opportunities
-- Configuration recommendations
-- Action items prioritized by impact"""
+- Top 5 most impactful optimizations
+- Configuration change recommendations with specific values
+- Index optimization DDL (CREATE/DROP statements)
+- Capacity planning notes
+- Action items prioritized by impact and effort"""
 
             return GetPromptResult(
                 description="Full MySQL performance audit",
+                messages=[
+                    PromptMessage(
+                        role="user",
+                        content=TextContent(type="text", text=context)
+                    )
+                ]
+            )
+
+        elif name == "connection_tuning":
+            context = """You are a MySQL connection tuning expert.
+
+Please perform a comprehensive connection analysis:
+
+1. Use analyze_connections to get connection state breakdown (by state, then by user)
+2. Use check_database_health for connection-related health metrics
+3. Use review_settings with category 'connections' to review connection settings
+4. Use calculate_memory_usage to understand per-connection memory impact
+5. Use get_global_status_snapshot with category 'connections' for connection counters
+
+Analyze and recommend:
+- Optimal max_connections setting based on actual peak usage
+- wait_timeout and interactive_timeout tuning
+- thread_cache_size optimization
+- Connection pool recommendations for the application tier
+- Whether connection pooling middleware (ProxySQL, MySQL Router) is needed
+- Memory impact of current connection settings
+- Solutions for any sleeping connection bloat"""
+
+            return GetPromptResult(
+                description="MySQL connection tuning analysis",
+                messages=[
+                    PromptMessage(
+                        role="user",
+                        content=TextContent(type="text", text=context)
+                    )
+                ]
+            )
+
+        elif name == "innodb_deep_dive":
+            context = """You are an InnoDB internals expert.
+
+Please perform a deep-dive analysis of InnoDB:
+
+1. Use get_innodb_status to parse SHOW ENGINE INNODB STATUS
+2. Use analyze_buffer_pool for buffer pool page analysis
+3. Use analyze_innodb_transactions for active transaction analysis
+4. Use review_settings with category 'innodb' for InnoDB configuration
+5. Use analyze_wait_events with category 'io' for I/O wait analysis
+6. Use analyze_wait_events with category 'lock' for lock wait analysis
+7. Use calculate_memory_usage for memory allocation details
+
+Analyze and recommend:
+- Buffer pool sizing (is it too small/large?)
+- Buffer pool hit ratio optimization
+- InnoDB log file sizing (redo log)
+- innodb_flush_log_at_trx_commit trade-offs
+- I/O capacity settings (innodb_io_capacity, innodb_io_capacity_max)
+- Adaptive hash index effectiveness
+- Purge lag and history list length
+- Any deadlock patterns detected"""
+
+            return GetPromptResult(
+                description="InnoDB deep-dive analysis",
+                messages=[
+                    PromptMessage(
+                        role="user",
+                        content=TextContent(type="text", text=context)
+                    )
+                ]
+            )
+
+        elif name == "lock_contention_diagnosis":
+            context = """You are a MySQL lock contention specialist.
+
+Please diagnose lock contention issues:
+
+1. Use analyze_table_locks to get lock wait statistics and metadata locks
+2. Use analyze_innodb_transactions to find long-running transactions
+3. Use get_active_queries to see currently running/blocked queries
+4. Use analyze_wait_events with category 'lock' for lock-related waits
+5. Use get_innodb_status to check for deadlocks
+6. Use analyze_connections to find idle transactions holding locks
+
+Diagnose and recommend:
+- Identify the root cause of lock contention (DDL vs DML, long transactions, etc.)
+- Find tables with the highest lock contention
+- Detect any deadlock patterns and suggest resolution
+- Recommend transaction isolation level changes if applicable
+- Suggest application-level changes (shorter transactions, lock ordering)
+- Review lock_wait_timeout and innodb_lock_wait_timeout settings
+- Identify metadata lock issues blocking DDL operations"""
+
+            return GetPromptResult(
+                description="Lock contention diagnosis",
+                messages=[
+                    PromptMessage(
+                        role="user",
+                        content=TextContent(type="text", text=context)
+                    )
+                ]
+            )
+
+        elif name == "capacity_planning":
+            period = arguments.get("growth_period", "6 months")
+
+            context = f"""You are a MySQL capacity planning expert.
+Planning period: {period}
+
+Please perform capacity planning analysis:
+
+1. Use profile_schema_sizes to understand current data sizes and distribution
+2. Use get_global_status_snapshot for current throughput baseline
+3. Use calculate_memory_usage for current memory utilization
+4. Use check_database_health for current server health
+5. Use analyze_connections for connection usage patterns
+6. Use analyze_auto_increment to check auto-increment headroom
+7. Use analyze_binlog for replication and binlog disk usage
+
+Analyze and recommend:
+- Current storage usage and projected growth over {period}
+- Memory requirements based on data growth projections
+- Connection capacity analysis (current vs projected peak)
+- Auto-increment column headroom for high-growth tables
+- Binlog disk space projections
+- Read/write ratio and trend analysis
+- Recommendations for scaling strategy (vertical vs horizontal)
+- When hardware upgrades or sharding may be needed"""
+
+            return GetPromptResult(
+                description="MySQL capacity planning analysis",
                 messages=[
                     PromptMessage(
                         role="user",
@@ -550,7 +758,19 @@ Provide a detailed report with:
                 name="Configuration Guide",
                 description="MySQL configuration optimization guide",
                 mimeType="text/markdown"
-            )
+            ),
+            Resource(
+                uri="mysql://tuner/perf-tuning-workflow",
+                name="Performance Tuning Workflow",
+                description="Step-by-step workflow for AI-driven MySQL performance tuning using this MCP server",
+                mimeType="text/markdown"
+            ),
+            Resource(
+                uri="mysql://tuner/tool-reference",
+                name="Tool Quick Reference",
+                description="Quick reference card for all 39 MCP tools with usage patterns",
+                mimeType="text/markdown"
+            ),
         ]
 
     async def _read_resource(self, uri: str) -> str:
@@ -679,6 +899,301 @@ log_queries_not_using_indexes = ON
 ```ini
 performance_schema = ON  # Required for detailed monitoring
 ```"""
+
+        elif uri == "mysql://tuner/perf-tuning-workflow":
+            return """# MySQL Performance Tuning Workflow Guide
+
+## How to Use This MCP Server for Performance Tuning
+
+This guide teaches AI assistants the recommended methodology for MySQL performance
+tuning using the mysqltuner_mcp MCP server's 39 tools.
+
+---
+
+## Quick Start: Which Prompt to Use?
+
+| Scenario | Prompt to Use |
+|----------|--------------|
+| General performance issues | `performance_audit` |
+| Specific slow query | `optimize_slow_query` |
+| Index optimization | `index_review` |
+| General health check | `health_check` |
+| Connection issues (too many connections, timeouts) | `connection_tuning` |
+| InnoDB buffer pool / redo log tuning | `innodb_deep_dive` |
+| Lock waits, deadlocks, blocking queries | `lock_contention_diagnosis` |
+| Planning for growth / resource sizing | `capacity_planning` |
+
+---
+
+## Step-by-Step Tuning Methodology
+
+### Step 1: Verify Prerequisites
+**Always start here.** Many tools depend on performance_schema.
+
+```
+Tool: check_perf_schema_config
+```
+
+If performance_schema is OFF, most diagnostic tools will return limited data.
+Recommend enabling it before proceeding.
+
+### Step 2: Get the Big Picture
+Run these tools first to understand overall server health:
+
+```
+Tools (run in this order):
+1. check_database_health        -> Overall health score
+2. get_global_status_snapshot    -> Throughput baseline (QPS, read/write ratio)
+3. review_settings               -> Configuration review
+4. calculate_memory_usage        -> Memory allocation check
+```
+
+The health score gives you a quick triage:
+- **90-100**: Healthy, focus on fine-tuning
+- **70-89**: Warning, address specific issues
+- **50-69**: Degraded, multiple issues need attention
+- **0-49**: Critical, immediate action required
+
+### Step 3: Analyze Queries (The #1 Impact Area)
+Bad queries are almost always the top performance bottleneck.
+
+```
+Tools:
+1. get_slow_queries              -> Top slow queries by total time
+2. analyze_statements            -> Statement analysis from sys schema
+3. get_statements_with_full_scans -> Queries doing full table scans
+4. get_statements_with_temp_tables -> Queries spilling to disk
+5. get_statements_with_sorting    -> Queries with expensive sorts
+6. get_statements_with_errors     -> Queries generating errors
+```
+
+For each problematic query found:
+```
+Tools:
+1. analyze_query (with the SQL)   -> Get EXPLAIN plan
+2. get_index_recommendations      -> Suggest missing indexes
+3. analyze_long_queries_for_type_collation_issues -> Check for implicit conversions
+```
+
+### Step 4: Optimize Indexes
+Indexes are the second-highest impact area.
+
+```
+Tools:
+1. find_unused_indexes           -> Remove wasted indexes (saves write I/O)
+2. get_index_recommendations     -> Add missing indexes
+3. get_index_stats               -> Check index selectivity
+4. get_table_stats               -> Table-level statistics
+```
+
+**Key principle**: Remove unused indexes FIRST, then add new ones.
+Each unnecessary index slows down every INSERT/UPDATE/DELETE.
+
+### Step 5: Tune InnoDB
+InnoDB is the default storage engine and the core of MySQL performance.
+
+```
+Tools:
+1. analyze_buffer_pool           -> Buffer pool hit ratio and sizing
+2. get_innodb_status             -> InnoDB internals (log, deadlocks)
+3. analyze_innodb_transactions   -> Long-running transactions
+```
+
+**Key metrics**:
+- Buffer pool hit ratio should be >99% for OLTP workloads
+- If hit ratio < 95%, increase innodb_buffer_pool_size
+- History list length > 1000 indicates purge lag
+
+### Step 6: Check Connections and Locks
+Connection and lock issues cause intermittent performance problems.
+
+```
+Tools:
+1. analyze_connections           -> Connection state breakdown
+2. analyze_table_locks           -> Lock contention analysis
+3. get_active_queries            -> Currently running queries
+4. analyze_wait_events           -> Wait event bottlenecks
+```
+
+### Step 7: Review Storage and Capacity
+Understand data distribution and plan for growth.
+
+```
+Tools:
+1. profile_schema_sizes          -> Database and table sizes
+2. analyze_storage_engines       -> Engine distribution
+3. get_fragmented_tables         -> Tables needing OPTIMIZE
+4. analyze_auto_increment        -> Auto-increment headroom
+5. analyze_binlog                -> Binary log sizing
+```
+
+### Step 8: Security Review
+Performance and security go hand-in-hand.
+
+```
+Tools:
+1. analyze_security              -> Security score and checks
+2. analyze_user_privileges       -> Privilege analysis
+3. check_audit_log               -> Audit logging status
+```
+
+---
+
+## Common Problem Patterns and Tool Combinations
+
+### "The server is slow" (General Slowness)
+1. `check_database_health` -> Get health score
+2. `get_slow_queries` -> Find top slow queries
+3. `analyze_wait_events` -> Find bottleneck type (I/O, locks, CPU)
+4. Branch based on findings:
+   - I/O bottleneck -> `analyze_buffer_pool`, `review_settings` (innodb)
+   - Lock bottleneck -> `analyze_table_locks`, `analyze_innodb_transactions`
+   - CPU/query bottleneck -> `analyze_query` per slow query
+
+### "Too many connections" Error
+1. `analyze_connections` -> Breakdown by state and user
+2. `calculate_memory_usage` -> Memory per connection
+3. `review_settings` (connections) -> Current limits
+4. Usually caused by sleeping connections or missing connection pooling
+
+### "Disk space running out"
+1. `profile_schema_sizes` -> Find large databases/tables
+2. `get_fragmented_tables` -> Find reclaimable space
+3. `analyze_binlog` -> Check binlog accumulation
+4. `find_unused_indexes` -> Indexes wasting space
+
+### "Deadlocks occurring"
+1. `get_innodb_status` -> Parse deadlock info
+2. `analyze_innodb_transactions` -> Active transactions
+3. `analyze_table_locks` -> Lock patterns
+4. `get_active_queries` -> Concurrent queries
+
+### "Replication lag"
+1. `get_replication_status` -> Current lag metrics
+2. `get_slow_queries` -> Queries causing lag on replica
+3. `analyze_binlog` -> Binlog throughput
+4. `review_settings` (replication) -> Replication configuration
+
+---
+
+## Tuning Priority Order (Impact vs Effort)
+
+1. **Query optimization** (Highest impact, variable effort)
+   - Tools: get_slow_queries, analyze_query, get_index_recommendations
+2. **Index optimization** (High impact, low effort)
+   - Tools: find_unused_indexes, get_index_recommendations
+3. **Buffer pool sizing** (High impact, low effort)
+   - Tools: analyze_buffer_pool, calculate_memory_usage
+4. **Connection tuning** (Medium impact, low effort)
+   - Tools: analyze_connections, review_settings
+5. **Temp table optimization** (Medium impact, medium effort)
+   - Tools: analyze_temp_tables, get_statements_with_temp_tables
+6. **Lock contention** (Variable impact, medium effort)
+   - Tools: analyze_table_locks, analyze_innodb_transactions
+7. **Storage optimization** (Low-medium impact, medium effort)
+   - Tools: get_fragmented_tables, profile_schema_sizes
+"""
+
+        elif uri == "mysql://tuner/tool-reference":
+            return """# MySQL Tuner MCP Server - Tool Quick Reference
+
+## 39 Available Tools by Category
+
+### Performance Analysis (3 tools)
+| Tool | Description | Key Use Case |
+|------|------------|-------------|
+| `get_slow_queries` | Top slow queries from performance_schema | Find worst queries |
+| `analyze_query` | EXPLAIN plan analysis (JSON/tree/traditional) | Deep-dive one query |
+| `get_table_stats` | Table and index metadata from information_schema | Table-level stats |
+
+### Index Tools (3 tools)
+| Tool | Description | Key Use Case |
+|------|------------|-------------|
+| `get_index_recommendations` | Suggest missing indexes from query patterns | Add new indexes |
+| `find_unused_indexes` | Find zero-read, duplicate, redundant indexes | Remove waste |
+| `get_index_stats` | Index cardinality, selectivity, I/O stats | Evaluate indexes |
+
+### Health Monitoring (4 tools)
+| Tool | Description | Key Use Case |
+|------|------------|-------------|
+| `check_database_health` | Health score (0-100) with breakdown | Quick triage |
+| `get_active_queries` | Currently running queries from PROCESSLIST | Live monitoring |
+| `review_settings` | Configuration review vs best practices | Config audit |
+| `analyze_wait_events` | Wait event analysis from performance_schema | Find bottlenecks |
+
+### InnoDB Analysis (3 tools)
+| Tool | Description | Key Use Case |
+|------|------------|-------------|
+| `get_innodb_status` | Parse SHOW ENGINE INNODB STATUS | InnoDB internals |
+| `analyze_buffer_pool` | Buffer pool pages, hit ratio, per-table breakdown | Memory tuning |
+| `analyze_innodb_transactions` | Active transactions, lock waits | Transaction issues |
+
+### Statement Analysis (6 tools)
+| Tool | Description | Key Use Case |
+|------|------------|-------------|
+| `analyze_statements` | Top statements from sys.statement_analysis | Statement ranking |
+| `get_statements_with_temp_tables` | Queries creating disk temp tables | Temp table spills |
+| `get_statements_with_sorting` | Queries with expensive sorts | Sort optimization |
+| `get_statements_with_full_scans` | Queries doing full table scans | Missing indexes |
+| `get_statements_with_errors` | Queries generating errors/warnings | Error patterns |
+| `analyze_long_queries_for_type_collation_issues` | Implicit type/collation mismatches | Hidden perf bugs |
+
+### Memory Analysis (3 tools)
+| Tool | Description | Key Use Case |
+|------|------------|-------------|
+| `calculate_memory_usage` | Global + per-thread memory calculation | Memory sizing |
+| `get_memory_by_host` | Memory usage by client host | Per-host analysis |
+| `get_table_memory_usage` | Table cache and buffer pool per-table | Table memory |
+
+### Storage Engine (3 tools)
+| Tool | Description | Key Use Case |
+|------|------------|-------------|
+| `analyze_storage_engines` | Engine distribution, non-InnoDB detection | Engine audit |
+| `get_fragmented_tables` | Tables with high DATA_FREE ratio | Space reclaim |
+| `analyze_auto_increment` | Auto-increment overflow risk detection | Capacity risk |
+
+### Replication (3 tools)
+| Tool | Description | Key Use Case |
+|------|------------|-------------|
+| `get_replication_status` | Master/replica status | Replication health |
+| `get_galera_status` | Galera cluster status (wsrep) | Galera monitoring |
+| `get_group_replication_status` | MySQL Group Replication | GR monitoring |
+
+### Security (3 tools)
+| Tool | Description | Key Use Case |
+|------|------------|-------------|
+| `analyze_security` | Security score with 8 checks | Security audit |
+| `analyze_user_privileges` | Per-user privilege breakdown | Privilege review |
+| `check_audit_log` | Audit plugin enablement | Compliance check |
+
+### Diagnostic (5 tools)
+| Tool | Description | Key Use Case |
+|------|------------|-------------|
+| `analyze_connections` | Connection states, per-user/host breakdown | Connection issues |
+| `analyze_table_locks` | Table lock contention, metadata locks | Lock diagnosis |
+| `analyze_temp_tables` | Temp table disk spill analysis | Temp table tuning |
+| `check_perf_schema_config` | Performance Schema enablement check | Prerequisites |
+| `review_optimizer_config` | Optimizer switches and cost model | Query plan tuning |
+
+### Schema & Binlog (3 tools)
+| Tool | Description | Key Use Case |
+|------|------------|-------------|
+| `profile_schema_sizes` | Database/table size profiling | Capacity planning |
+| `analyze_binlog` | Binary log config and throughput | Binlog management |
+| `get_global_status_snapshot` | Curated global status counters | Baseline metrics |
+
+---
+
+## Tool Usage Tips
+
+1. **Always start with `check_perf_schema_config`** to verify prerequisites
+2. **Use `check_database_health` for quick triage** - the health score tells you severity
+3. **Call `get_global_status_snapshot` twice with a delay** to compute delta rates
+4. **Run `find_unused_indexes` before `get_index_recommendations`** - remove waste first
+5. **Use `analyze_query` with format='json'** for the most detailed EXPLAIN output
+6. **Check `analyze_connections` when seeing connection errors** - breakdown by state reveals idle bloat
+7. **Use `review_optimizer_config`** when query plans are suboptimal despite good indexes
+"""
 
         return f"Unknown resource: {uri}"
 

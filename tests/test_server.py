@@ -86,13 +86,17 @@ class TestMySQLTunerServer:
         server = MySQLTunerServer(config)
         prompts = server._get_prompts()
 
-        assert len(prompts) == 4
+        assert len(prompts) == 8
 
         prompt_names = [p.name for p in prompts]
         assert "optimize_slow_query" in prompt_names
         assert "health_check" in prompt_names
         assert "index_review" in prompt_names
         assert "performance_audit" in prompt_names
+        assert "connection_tuning" in prompt_names
+        assert "innodb_deep_dive" in prompt_names
+        assert "lock_contention_diagnosis" in prompt_names
+        assert "capacity_planning" in prompt_names
 
     def test_get_resources(self):
         """Test resource definitions."""
@@ -101,13 +105,15 @@ class TestMySQLTunerServer:
         server = MySQLTunerServer(config)
         resources = server._get_resources()
 
-        assert len(resources) == 3
+        assert len(resources) == 5
 
         # Convert URIs to strings for comparison (handles AnyUrl objects)
         uris = [str(r.uri) for r in resources]
         assert "mysql://tuner/best-practices" in uris
         assert "mysql://tuner/index-guidelines" in uris
         assert "mysql://tuner/configuration-guide" in uris
+        assert "mysql://tuner/perf-tuning-workflow" in uris
+        assert "mysql://tuner/tool-reference" in uris
 
     @pytest.mark.asyncio
     async def test_read_resource_best_practices(self):
@@ -153,6 +159,30 @@ class TestMySQLTunerServer:
         assert "Unknown resource" in content
 
     @pytest.mark.asyncio
+    async def test_read_resource_perf_tuning_workflow(self):
+        """Test reading performance tuning workflow resource."""
+        config = ServerConfig(mysql_uri=TEST_MYSQL_URI)
+
+        server = MySQLTunerServer(config)
+        content = await server._read_resource("mysql://tuner/perf-tuning-workflow")
+
+        assert "Tuning Workflow" in content
+        assert "check_perf_schema_config" in content
+        assert "Step 1" in content
+
+    @pytest.mark.asyncio
+    async def test_read_resource_tool_reference(self):
+        """Test reading tool reference resource."""
+        config = ServerConfig(mysql_uri=TEST_MYSQL_URI)
+
+        server = MySQLTunerServer(config)
+        content = await server._read_resource("mysql://tuner/tool-reference")
+
+        assert "Tool Quick Reference" in content
+        assert "39 Available Tools" in content
+        assert "analyze_connections" in content
+
+    @pytest.mark.asyncio
     async def test_get_prompt_result_optimize_slow_query(self):
         """Test getting optimize_slow_query prompt."""
         config = ServerConfig(mysql_uri=TEST_MYSQL_URI)
@@ -189,6 +219,52 @@ class TestMySQLTunerServer:
         assert "Unknown prompt" in result.messages[0].content.text
 
     @pytest.mark.asyncio
+    async def test_get_prompt_result_connection_tuning(self):
+        """Test getting connection_tuning prompt."""
+        config = ServerConfig(mysql_uri=TEST_MYSQL_URI)
+
+        server = MySQLTunerServer(config)
+        result = await server._get_prompt_result("connection_tuning", {})
+
+        assert result.description is not None
+        assert len(result.messages) > 0
+        assert "analyze_connections" in result.messages[0].content.text
+
+    @pytest.mark.asyncio
+    async def test_get_prompt_result_innodb_deep_dive(self):
+        """Test getting innodb_deep_dive prompt."""
+        config = ServerConfig(mysql_uri=TEST_MYSQL_URI)
+
+        server = MySQLTunerServer(config)
+        result = await server._get_prompt_result("innodb_deep_dive", {})
+
+        assert result.description is not None
+        assert "analyze_buffer_pool" in result.messages[0].content.text
+
+    @pytest.mark.asyncio
+    async def test_get_prompt_result_lock_contention_diagnosis(self):
+        """Test getting lock_contention_diagnosis prompt."""
+        config = ServerConfig(mysql_uri=TEST_MYSQL_URI)
+
+        server = MySQLTunerServer(config)
+        result = await server._get_prompt_result("lock_contention_diagnosis", {})
+
+        assert result.description is not None
+        assert "analyze_table_locks" in result.messages[0].content.text
+
+    @pytest.mark.asyncio
+    async def test_get_prompt_result_capacity_planning(self):
+        """Test getting capacity_planning prompt."""
+        config = ServerConfig(mysql_uri=TEST_MYSQL_URI)
+
+        server = MySQLTunerServer(config)
+        result = await server._get_prompt_result("capacity_planning", {"growth_period": "1year"})
+
+        assert result.description is not None
+        assert "profile_schema_sizes" in result.messages[0].content.text
+        assert "1year" in result.messages[0].content.text
+
+    @pytest.mark.asyncio
     async def test_initialize(self):
         """Test server initialization."""
         config = ServerConfig(mysql_uri=TEST_MYSQL_URI)
@@ -212,7 +288,7 @@ class TestMySQLTunerServer:
             )
             assert server.db_pool is not None
             assert server.sql_driver is not None
-            assert len(server.tools) == 30  # All 30 tools registered
+            assert len(server.tools) == 39  # All 39 tools registered
 
     @pytest.mark.asyncio
     async def test_shutdown(self):

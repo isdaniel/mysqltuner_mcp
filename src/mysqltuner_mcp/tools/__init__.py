@@ -11,6 +11,8 @@ Contains tool handlers for:
 - Storage engine analysis
 - Replication status
 - Security analysis
+- Diagnostic analysis
+- Schema profiling
 """
 
 from .toolhandler import ToolHandler
@@ -41,6 +43,7 @@ from .tools_statements import (
     StatementsSortingToolHandler,
     StatementsFullScansToolHandler,
     StatementErrorsToolHandler,
+    LongQueryTypeCollationIssuesToolHandler,
 )
 from .tools_memory import (
     MemoryCalculationsToolHandler,
@@ -61,6 +64,18 @@ from .tools_security import (
     SecurityAnalysisToolHandler,
     UserPrivilegesToolHandler,
     AuditLogToolHandler,
+)
+from .tools_diagnostic import (
+    ConnectionAnalysisToolHandler,
+    TableLockAnalysisToolHandler,
+    TempTableAnalysisToolHandler,
+    PerfSchemaConfigToolHandler,
+    OptimizerConfigToolHandler,
+)
+from .tools_schema import (
+    SchemaProfilingToolHandler,
+    BinlogAnalysisToolHandler,
+    GlobalStatusSnapshotToolHandler,
 )
 
 __all__ = [
@@ -89,6 +104,7 @@ __all__ = [
     "StatementsSortingToolHandler",
     "StatementsFullScansToolHandler",
     "StatementErrorsToolHandler",
+    "LongQueryTypeCollationIssuesToolHandler",
     # Memory
     "MemoryCalculationsToolHandler",
     "MemoryByHostToolHandler",
@@ -105,4 +121,14 @@ __all__ = [
     "SecurityAnalysisToolHandler",
     "UserPrivilegesToolHandler",
     "AuditLogToolHandler",
+    # Diagnostic
+    "ConnectionAnalysisToolHandler",
+    "TableLockAnalysisToolHandler",
+    "TempTableAnalysisToolHandler",
+    "PerfSchemaConfigToolHandler",
+    "OptimizerConfigToolHandler",
+    # Schema & Binlog
+    "SchemaProfilingToolHandler",
+    "BinlogAnalysisToolHandler",
+    "GlobalStatusSnapshotToolHandler",
 ]

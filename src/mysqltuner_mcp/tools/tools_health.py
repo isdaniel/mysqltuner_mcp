@@ -700,12 +700,12 @@ This helps identify:
             elif category == "log":
                 query += " AND EVENT_NAME LIKE 'wait/synch/cond/innodb/log%'"
 
-            query += f"""
+            query += """
                 ORDER BY total_wait_sec DESC
-                LIMIT {top_n}
+                LIMIT %s
             """
 
-            results = await self.sql_driver.execute_query(query)
+            results = await self.sql_driver.execute_query(query, [top_n])
 
             total_wait_time = 0
 
