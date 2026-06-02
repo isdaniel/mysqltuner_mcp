@@ -981,7 +981,11 @@ On older versions returns a clear ValueError message."""
         edges = []
         blockers_set: set[str] = set()
         waiters_set: set[str] = set()
-        adj: dict[str, list[str]] = {}
+        # Adjacency as set: multiple lock-wait events between the same
+        # (blocker, waiter) pair would otherwise inflate blocks_count
+        # and trigger redundant DFS work in _chain_depth / _find_cycles.
+        # The raw events stay in `edges` for per-wait detail.
+        adj: dict[str, set[str]] = {}
         meta: dict[str, dict] = {}
 
         for r in rows:
@@ -989,7 +993,7 @@ On older versions returns a clear ValueError message."""
             waiter = str(r["waiter_trx_id"])
             blockers_set.add(blocker)
             waiters_set.add(waiter)
-            adj.setdefault(blocker, []).append(waiter)
+            adj.setdefault(blocker, set()).add(waiter)
             meta.setdefault(blocker, {
                 "trx_id": blocker,
                 "thread_id": r["blocker_thread_id"],
@@ -1018,7 +1022,7 @@ On older versions returns a clear ValueError message."""
             longest_chain = max(longest_chain, depth)
             roots.append({
                 **meta[rid],
-                "blocks_count": len(adj.get(rid, [])),
+                "blocks_count": len(adj.get(rid, set())),
                 "chain_depth": depth,
             })
 
@@ -1035,12 +1039,12 @@ On older versions returns a clear ValueError message."""
             },
         }
 
-    def _chain_depth(self, node: str, adj: dict[str, list[str]], visited: set[str]) -> int:
+    def _chain_depth(self, node: str, adj: dict[str, set[str]], visited: set[str]) -> int:
         if node in visited:
             return 0  # cycle guard for the current DFS path
         visited.add(node)
         try:
-            children = adj.get(node, [])
+            children = adj.get(node, set())
             if not children:
                 return 1
             return 1 + max(
@@ -1053,7 +1057,7 @@ On older versions returns a clear ValueError message."""
             # so diamond-shaped DAGs report the correct longest chain.
             visited.discard(node)
 
-    def _find_cycles(self, adj: dict[str, list[str]], nodes: set[str]) -> list[list[str]]:
+    def _find_cycles(self, adj: dict[str, set[str]], nodes: set[str]) -> list[list[str]]:
         """Tarjan's strongly connected components; SCCs of size > 1 are cycles."""
         index_counter = [0]
         stack: list[str] = []
@@ -1069,7 +1073,7 @@ On older versions returns a clear ValueError message."""
             stack.append(v)
             on_stack[v] = True
 
-            for w in adj.get(v, []):
+            for w in adj.get(v, set()):
                 if w not in index:
                     strongconnect(w)
                     lowlinks[v] = min(lowlinks[v], lowlinks[w])

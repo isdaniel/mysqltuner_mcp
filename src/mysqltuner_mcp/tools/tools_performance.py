@@ -977,9 +977,12 @@ System schemas (mysql, information_schema, performance_schema, sys) are excluded
             return ("", "")
         basename = parts[-1]
         schema = parts[-2]
-        # Strip .ibd / .ibt extensions
+        # Strip .ibd / .ibt extension
         if "." in basename:
-            table = basename.rsplit(".", 1)[0]
-        else:
-            table = basename
+            basename = basename.rsplit(".", 1)[0]
+        # Strip MySQL partition suffix (e.g. "orders#p#p1" or
+        # "orders#P#p0#SP#sp0") so per-partition I/O aggregates back to
+        # the logical table — otherwise top-N hotspots would report each
+        # partition as a separate "table".
+        table = basename.split("#")[0]
         return (schema, table)

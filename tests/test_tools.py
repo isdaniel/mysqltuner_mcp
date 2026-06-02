@@ -3073,3 +3073,90 @@ async def test_compare_explain_plans_meaningful_row_difference_still_wins(mock_s
     })
     data = json.loads(result[0].text)
     assert data["verdict"] == "B is better"
+
+
+def test_table_io_hotspots_strips_partition_suffix():
+    """Regression: MySQL partition files are named e.g. orders#p#p1.ibd;
+    the parser must return 'orders', not 'orders#p#p1', so per-partition
+    I/O aggregates back to the logical table.
+    """
+    from mysqltuner_mcp.tools.tools_performance import TableIoHotspotsToolHandler
+    # lowercase MySQL partition suffix
+    assert TableIoHotspotsToolHandler._parse_filename(
+        "/var/lib/mysql/testdb/orders#p#p1.ibd"
+    ) == ("testdb", "orders")
+    # uppercase suffix (older MySQL versions)
+    assert TableIoHotspotsToolHandler._parse_filename(
+        "/var/lib/mysql/testdb/orders#P#p0.ibd"
+    ) == ("testdb", "orders")
+    # subpartition
+    assert TableIoHotspotsToolHandler._parse_filename(
+        "/var/lib/mysql/testdb/orders#P#p0#SP#sp0.ibd"
+    ) == ("testdb", "orders")
+    # No partition suffix: existing behavior unchanged
+    assert TableIoHotspotsToolHandler._parse_filename(
+        "/var/lib/mysql/testdb/users.ibd"
+    ) == ("testdb", "users")
+
+
+@pytest.mark.asyncio
+async def test_table_io_hotspots_aggregates_partitions(mock_sql_driver):
+    """Regression: I/O from multiple partitions of the same table should
+    be reported as ONE entry, not split across partition pseudo-tables.
+    Without partition-suffix stripping the test would see two entries
+    (orders#p#p1 and orders#p#p2) instead of one aggregated orders row.
+    """
+    from mysqltuner_mcp.tools.tools_performance import TableIoHotspotsToolHandler
+    mock_sql_driver.execute_query = AsyncMock(return_value=[
+        {"FILE_NAME": "/var/lib/mysql/testdb/orders#p#p1.ibd",
+         "total_read_bytes": 1000, "total_write_bytes": 1000,
+         "total_read_timer": 1e12, "total_write_timer": 1e12,
+         "read_count": 100, "write_count": 100},
+        {"FILE_NAME": "/var/lib/mysql/testdb/orders#p#p2.ibd",
+         "total_read_bytes": 2000, "total_write_bytes": 2000,
+         "total_read_timer": 2e12, "total_write_timer": 2e12,
+         "read_count": 200, "write_count": 200},
+    ])
+    handler = TableIoHotspotsToolHandler(mock_sql_driver)
+    result = await handler.run_tool({})
+    data = json.loads(result[0].text)
+    table_names = [t["table"] for t in data["tables"]]
+    # All entries must be the LOGICAL table name "orders", never the
+    # partition-suffixed form.
+    assert all(name == "orders" for name in table_names), (
+        f"got partition-suffixed names: {table_names}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_analyze_lock_wait_graph_dedupes_duplicate_edges(mock_sql_driver):
+    """Regression: multiple lock-wait rows between the same blocker/waiter
+    pair must not inflate blocks_count or trigger redundant DFS.
+
+    Setup: T1 blocks T2 across THREE different lock waits on different
+    tables (a realistic scenario when one long transaction holds locks
+    on multiple rows another transaction needs). The structural graph
+    is still T1 -> T2, so blocks_count must be 1 (not 3).
+    """
+    from mysqltuner_mcp.tools.tools_diagnostic import LockWaitGraphToolHandler
+    mock_sql_driver.execute_query = AsyncMock(return_value=[
+        {"blocker_trx_id": "T1", "blocker_thread_id": 1, "waiter_trx_id": "T2",
+         "waiter_thread_id": 2, "lock_type": "RECORD", "table_name": "orders",
+         "wait_seconds": 1, "blocker_query": "q1", "waiter_query": "q2"},
+        {"blocker_trx_id": "T1", "blocker_thread_id": 1, "waiter_trx_id": "T2",
+         "waiter_thread_id": 2, "lock_type": "RECORD", "table_name": "users",
+         "wait_seconds": 1, "blocker_query": "q1", "waiter_query": "q2"},
+        {"blocker_trx_id": "T1", "blocker_thread_id": 1, "waiter_trx_id": "T2",
+         "waiter_thread_id": 2, "lock_type": "RECORD", "table_name": "products",
+         "wait_seconds": 1, "blocker_query": "q1", "waiter_query": "q2"},
+    ])
+    handler = LockWaitGraphToolHandler(mock_sql_driver)
+    result = await handler.run_tool({})
+    data = json.loads(result[0].text)
+    # The raw edges list preserves every wait event (3 total — per-wait detail)
+    assert len(data["edges"]) == 3
+    # But the structural graph has T1 -> T2 ONCE, so blocks_count is 1
+    roots_by_id = {r["trx_id"]: r for r in data["roots"]}
+    assert roots_by_id["T1"]["blocks_count"] == 1
+    # And longest_chain_depth is 2 (T1 -> T2), not double-counted
+    assert data["summary"]["longest_chain_depth"] == 2

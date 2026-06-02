@@ -76,6 +76,18 @@ def _tokenize_and_split(query: str) -> list[str]:
 
         # Block comment
         if ch == "/" and nxt == "*":
+            # MySQL "executable comments" (/*! ... */ and /*!NNNNN ... */)
+            # are conditionally parsed by the server: the content INSIDE the
+            # comment is treated as SQL when the server version matches the
+            # optional version-number gate (or always when there's no gate).
+            # Stripping them like a regular comment lets an attacker smuggle
+            # DDL/DML past this guard, e.g. `/*!50001 DROP TABLE x */ SELECT 1`.
+            # Reject outright — legitimate analyze_query callers do not need
+            # them.
+            if i + 2 < n and query[i + 2] == "!":
+                raise SqlGuardError(
+                    "MySQL executable comments (/*! ... */) are not permitted"
+                )
             end = query.find("*/", i + 2)
             if end == -1:
                 # Unterminated block comment is a strong signal of an

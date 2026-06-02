@@ -172,3 +172,34 @@ class TestNoBackslashEscapesBypassRegression:
     def test_backslash_quote_does_not_escape_in_double_quoted(self):
         q = 'SELECT "abc' + chr(92) + '"; DROP TABLE users; --"'
         _bad(q, match="Only one statement")
+
+
+class TestMySQLExecutableCommentBypassRegression:
+    """Regression tests for the /*! ... */ executable-comment bypass.
+
+    MySQL conditionally executes the contents of `/*! ... */` and
+    `/*!NNNNN ... */` comments (parsed-as-SQL when the server version
+    matches the optional gate). A naive comment stripper that treats
+    them as regular block comments lets an attacker smuggle DDL/DML
+    past this guard. We reject any /*! outright.
+    """
+
+    def test_executable_comment_after_select_rejected(self):
+        _bad("SELECT 1; /*!50001 DROP TABLE users */",
+             match="executable comments")
+
+    def test_standalone_executable_comment_rejected(self):
+        _bad("/*!50001 DROP TABLE users */ SELECT 1",
+             match="executable comments")
+
+    def test_executable_comment_embedded_in_select_rejected(self):
+        _bad("SELECT 1 /*!50001 ; DROP TABLE users */",
+             match="executable comments")
+
+    def test_executable_comment_no_version_gate_rejected(self):
+        _bad("/*! DROP TABLE x */ SELECT 1",
+             match="executable comments")
+
+    def test_regular_block_comment_still_allowed(self):
+        # Sanity: a NON-executable block comment is still fine
+        _ok("SELECT 1 /* regular comment */")
