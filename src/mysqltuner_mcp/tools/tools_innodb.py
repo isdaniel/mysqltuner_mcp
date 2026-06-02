@@ -907,3 +907,162 @@ Helps identify transaction-related performance issues."""
 
         except Exception as e:
             return self.format_error(e)
+
+
+class InnoDBRedoLogPressureToolHandler(ToolHandler):
+    """Tool handler for InnoDB redo log sizing analysis."""
+
+    name = "analyze_innodb_redo_log_pressure"
+    title = "InnoDB Redo Log Pressure"
+    read_only_hint = True
+    destructive_hint = False
+    idempotent_hint = True
+    open_world_hint = False
+    description = """Measure InnoDB redo log fill rate and recommend sizing.
+
+Computes:
+- redo_log_capacity_bytes (innodb_redo_log_capacity on 8.0.30+, else
+  innodb_log_files_in_group * innodb_log_file_size)
+- current_checkpoint_age_bytes (from innodb_metrics.log_lsn_checkpoint_age)
+- checkpoint_age_pct
+- lsn_write_rate_bytes_per_sec (samples log_lsn_current twice with 2s delay)
+- estimated_time_to_full_cycle_sec
+
+Verdicts: healthy / undersized / oversized / insufficient_data."""
+
+    SAMPLE_WINDOW_SEC = 2.0
+
+    def __init__(self, sql_driver: SqlDriver):
+        self.sql_driver = sql_driver
+
+    def get_tool_definition(self) -> Tool:
+        return Tool(
+            name=self.name,
+            description=self.description,
+            inputSchema={"type": "object", "properties": {}, "required": []},
+            annotations=self.get_annotations()
+        )
+
+    async def run_tool(self, arguments: dict[str, Any]) -> Sequence[TextContent]:
+        try:
+            capacity = await self._resolve_capacity()
+
+            sample1 = await self._sample_metrics()
+            import asyncio
+            await asyncio.sleep(self.SAMPLE_WINDOW_SEC)
+            sample2 = await self._sample_metrics()
+
+            if (
+                capacity == 0
+                or not sample1.get("enabled")
+                or not sample2.get("enabled")
+            ):
+                # capacity==0 means we couldn't resolve innodb_redo_log_capacity
+                # nor the legacy innodb_log_file_size pair — refuse to give a
+                # verdict (and certainly never recommend "= 0").
+                rationale: list[str] = []
+                if capacity == 0:
+                    rationale.append(
+                        "Could not resolve redo log capacity from "
+                        "innodb_redo_log_capacity or innodb_log_file_size"
+                    )
+                if not sample1.get("enabled") or not sample2.get("enabled"):
+                    rationale.append(
+                        "INNODB_METRICS not enabled for log_lsn_* counters"
+                    )
+                output = {
+                    "redo_log_capacity_bytes": capacity,
+                    "current_checkpoint_age_bytes": None,
+                    "checkpoint_age_pct": None,
+                    "lsn_write_rate_bytes_per_sec": None,
+                    "estimated_time_to_full_cycle_sec": None,
+                    "verdict": "insufficient_data",
+                    "rationale": rationale,
+                    "recommendation": None,
+                }
+                return self.format_json_result(output)
+
+            checkpoint_age = sample2["checkpoint_age"] or 0
+            checkpoint_age_pct = round(checkpoint_age / capacity * 100, 2) if capacity > 0 else 0
+            lsn_delta = max(0, sample2["lsn_current"] - sample1["lsn_current"])
+            lsn_rate = lsn_delta / self.SAMPLE_WINDOW_SEC
+            time_to_full = (capacity / lsn_rate) if lsn_rate > 0 else None
+
+            verdict, rationale, recommendation = self._verdict(
+                capacity, checkpoint_age_pct, time_to_full
+            )
+
+            output = {
+                "redo_log_capacity_bytes": capacity,
+                "current_checkpoint_age_bytes": checkpoint_age,
+                "checkpoint_age_pct": checkpoint_age_pct,
+                "lsn_write_rate_bytes_per_sec": round(lsn_rate, 2),
+                "estimated_time_to_full_cycle_sec": (
+                    round(time_to_full, 2) if time_to_full is not None else None
+                ),
+                "verdict": verdict,
+                "rationale": rationale,
+                "recommendation": recommendation,
+            }
+            return self.format_json_result(output)
+
+        except Exception as e:
+            return self.format_error(e)
+
+    async def _resolve_capacity(self) -> int:
+        vars1 = await self.sql_driver.get_server_variables("innodb_redo_log_capacity")
+        cap_str = vars1.get("innodb_redo_log_capacity", "")
+        try:
+            cap = int(cap_str)
+        except (TypeError, ValueError):
+            cap = 0
+        if cap > 0:
+            return cap
+        # Fall back to legacy vars
+        vars2 = await self.sql_driver.get_server_variables("innodb_log_file%")
+        try:
+            files = int(vars2.get("innodb_log_files_in_group", "0"))
+            size = int(vars2.get("innodb_log_file_size", "0"))
+        except (TypeError, ValueError):
+            files = size = 0
+        return files * size
+
+    async def _sample_metrics(self) -> dict:
+        rows = await self.sql_driver.execute_query(
+            "SELECT NAME, COUNT, STATUS FROM information_schema.INNODB_METRICS "
+            "WHERE NAME IN ('log_lsn_current', 'log_lsn_checkpoint_age')"
+        )
+        by_name = {r["NAME"]: r for r in rows}
+        enabled = all(
+            by_name.get(n, {}).get("STATUS") == "enabled"
+            for n in ("log_lsn_current", "log_lsn_checkpoint_age")
+        )
+        return {
+            "enabled": enabled,
+            "lsn_current": int(by_name.get("log_lsn_current", {}).get("COUNT") or 0),
+            "checkpoint_age": int(by_name.get("log_lsn_checkpoint_age", {}).get("COUNT") or 0),
+        }
+
+    def _verdict(
+        self, capacity: int, checkpoint_age_pct: float, time_to_full: float | None
+    ) -> tuple[str, list[str], str | None]:
+        rationale: list[str] = []
+        recommendation: str | None = None
+        if checkpoint_age_pct > 75 or (time_to_full is not None and time_to_full < 60):
+            rationale.append(
+                f"checkpoint_age at {checkpoint_age_pct}%; "
+                f"est. {time_to_full}s to fill" if time_to_full else
+                f"checkpoint_age at {checkpoint_age_pct}%"
+            )
+            recommendation = f"innodb_redo_log_capacity = {capacity * 2}"
+            return "undersized", rationale, recommendation
+        if checkpoint_age_pct < 10 and capacity > 8 * 1024 * 1024 * 1024:
+            rationale.append(
+                f"checkpoint_age at {checkpoint_age_pct}% on {capacity // (1024**3)}GB capacity"
+            )
+            recommendation = (
+                f"innodb_redo_log_capacity = {max(256 * 1024 * 1024, capacity // 2)}"
+            )
+            return "oversized", rationale, recommendation
+        rationale.append(f"checkpoint_age at {checkpoint_age_pct}%; healthy")
+        return "healthy", rationale, None

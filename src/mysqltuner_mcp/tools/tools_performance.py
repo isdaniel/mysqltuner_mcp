@@ -232,6 +232,11 @@ WARNING: With analyze=true, the query is actually executed!"""
                         "description": "Output format for the execution plan",
                         "enum": ["traditional", "json", "tree"],
                         "default": "json"
+                    },
+                    "confirm_write": {
+                        "type": "boolean",
+                        "description": "Required when analyze=true AND the query is a write (UPDATE/DELETE/INSERT/REPLACE). EXPLAIN ANALYZE actually executes the wrapped statement — set this flag to acknowledge.",
+                        "default": False
                     }
                 },
                 "required": ["query"]
@@ -243,13 +248,16 @@ WARNING: With analyze=true, the query is actually executed!"""
         try:
             self.validate_required_args(arguments, ["query"])
 
+            from ..security import assert_safe_explain_target
+
             query = arguments["query"].strip()
-            if not query:
-                raise ValueError("Query cannot be empty")
-            if ";" in query.rstrip(";"):
-                raise ValueError("Multiple statements are not allowed")
             analyze = arguments.get("analyze", False)
             format_type = arguments.get("format", "json")
+            confirm_write = arguments.get("confirm_write", False)
+
+            assert_safe_explain_target(
+                query, analyze=analyze, confirm_write=confirm_write,
+            )
 
             # Build EXPLAIN query
             if analyze:
@@ -658,3 +666,346 @@ tables (mysql, information_schema, performance_schema, sys)."""
             )
 
         return analysis
+
+
+class CompareExplainPlansToolHandler(ToolHandler):
+    """Tool handler for diffing two query variants' EXPLAIN plans."""
+
+    name = "compare_explain_plans"
+    title = "EXPLAIN Plan Comparator"
+    read_only_hint = True
+    destructive_hint = False
+    idempotent_hint = True
+    open_world_hint = False
+    description = """Compare EXPLAIN plans for two query variants and pick the better one.
+
+Inputs:
+- query_a: first SQL variant
+- query_b: second SQL variant
+- label_a, label_b: optional human-friendly labels
+
+Both queries pass through the sql_guard (single statement, no DDL),
+then both get EXPLAIN FORMAT=JSON. The diff includes access_type
+changes, key usage changes, rows_examined delta, full-scan delta.
+
+Verdict heuristic (in order):
+1. Fewer full scans wins
+2. Else, side with materially fewer rows examined (>=20% delta) wins
+3. Else, "no significant difference"."""
+
+    def __init__(self, sql_driver: SqlDriver):
+        self.sql_driver = sql_driver
+
+    def get_tool_definition(self) -> Tool:
+        return Tool(
+            name=self.name,
+            description=self.description,
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query_a": {"type": "string", "description": "First SQL query"},
+                    "query_b": {"type": "string", "description": "Second SQL query"},
+                    "label_a": {"type": "string", "description": "Label for query A"},
+                    "label_b": {"type": "string", "description": "Label for query B"},
+                },
+                "required": ["query_a", "query_b"]
+            },
+            annotations=self.get_annotations()
+        )
+
+    async def run_tool(self, arguments: dict[str, Any]) -> Sequence[TextContent]:
+        try:
+            from ..security import assert_safe_explain_target
+
+            self.validate_required_args(arguments, ["query_a", "query_b"])
+            query_a = arguments["query_a"].strip()
+            query_b = arguments["query_b"].strip()
+            label_a = arguments.get("label_a", "A")
+            label_b = arguments.get("label_b", "B")
+
+            assert_safe_explain_target(query_a, analyze=False, confirm_write=False)
+            assert_safe_explain_target(query_b, analyze=False, confirm_write=False)
+
+            res_a = await self.sql_driver.execute_query(f"EXPLAIN FORMAT=JSON {query_a}")
+            res_b = await self.sql_driver.execute_query(f"EXPLAIN FORMAT=JSON {query_b}")
+
+            import json as _json
+            # Some MySQL drivers / mock environments return the column name
+            # as "explain" instead of "EXPLAIN" — accept either to avoid a
+            # KeyError on otherwise valid results.
+            plan_a = (
+                _json.loads(res_a[0].get("EXPLAIN") or res_a[0].get("explain") or "{}")
+                if res_a else {}
+            )
+            plan_b = (
+                _json.loads(res_b[0].get("EXPLAIN") or res_b[0].get("explain") or "{}")
+                if res_b else {}
+            )
+
+            tables_a = self._extract_tables(plan_a)
+            tables_b = self._extract_tables(plan_b)
+
+            full_scans_a = sum(1 for t in tables_a if t["access_type"] == "ALL")
+            full_scans_b = sum(1 for t in tables_b if t["access_type"] == "ALL")
+            rows_a = sum(t["rows_examined_per_scan"] or 0 for t in tables_a)
+            rows_b = sum(t["rows_examined_per_scan"] or 0 for t in tables_b)
+
+            rationale: list[str] = []
+            verdict = "no significant difference"
+
+            if full_scans_a != full_scans_b:
+                if full_scans_b < full_scans_a:
+                    verdict = f"{label_b} is better"
+                    rationale.append(
+                        f"{label_b} eliminates {full_scans_a - full_scans_b} full scan(s)"
+                    )
+                else:
+                    verdict = f"{label_a} is better"
+                    rationale.append(
+                        f"{label_a} eliminates {full_scans_b - full_scans_a} full scan(s)"
+                    )
+            else:
+                # Require BOTH a relative delta (>=20% of the larger side) AND
+                # an absolute floor — without the floor, trivial differences
+                # like 1 vs 0 rows examined would be reported as "better",
+                # which is noisy and misleading for tiny queries.
+                rel_threshold = 0.2 * max(rows_a, rows_b, 1)
+                abs_floor = 10
+                delta = abs(rows_a - rows_b)
+                if delta >= rel_threshold and delta >= abs_floor:
+                    if rows_b < rows_a:
+                        verdict = f"{label_b} is better"
+                        rationale.append(
+                            f"{label_b} examines {rows_a - rows_b} fewer rows"
+                        )
+                    else:
+                        verdict = f"{label_a} is better"
+                        rationale.append(
+                            f"{label_a} examines {rows_b - rows_a} fewer rows"
+                        )
+
+            output = {
+                "label_a": label_a,
+                "label_b": label_b,
+                "query_a": {"sql": query_a, "plan": plan_a, "tables": tables_a},
+                "query_b": {"sql": query_b, "plan": plan_b, "tables": tables_b},
+                "diff": {
+                    "full_scans_a": full_scans_a,
+                    "full_scans_b": full_scans_b,
+                    "full_scans_change": full_scans_b - full_scans_a,
+                    "rows_examined_a": rows_a,
+                    "rows_examined_b": rows_b,
+                    "rows_examined_delta": rows_b - rows_a,
+                },
+                "verdict": verdict,
+                "rationale": rationale,
+            }
+            return self.format_json_result(output)
+
+        except Exception as e:
+            return self.format_error(e)
+
+    def _extract_tables(self, plan: dict) -> list[dict]:
+        """Walk a FORMAT=JSON EXPLAIN tree; return per-table access info."""
+        out: list[dict] = []
+
+        def visit(node: Any) -> None:
+            if isinstance(node, dict):
+                if "table" in node and isinstance(node["table"], dict):
+                    t = node["table"]
+                    out.append({
+                        "table_name": t.get("table_name"),
+                        "access_type": t.get("access_type"),
+                        "key": t.get("key"),
+                        "rows_examined_per_scan": t.get("rows_examined_per_scan"),
+                        "filtered": t.get("filtered"),
+                    })
+                for v in node.values():
+                    visit(v)
+            elif isinstance(node, list):
+                for v in node:
+                    visit(v)
+
+        visit(plan)
+        return out
+
+
+class TableIoHotspotsToolHandler(ToolHandler):
+    """Tool handler for ranking tables by file I/O latency."""
+
+    name = "get_table_io_hotspots"
+    title = "Table I/O Hotspots"
+    read_only_hint = True
+    destructive_hint = False
+    idempotent_hint = True
+    open_world_hint = False
+    description = """Rank tables by their file I/O latency from performance_schema.file_summary_by_instance.
+
+Maps perf bottlenecks to specific tables (not just queries). The filename
+in file_summary_by_instance is parsed to extract (schema, table) — the
+basename without extension is the table; parent directory is the schema.
+
+System schemas (mysql, information_schema, performance_schema, sys) are excluded."""
+
+    def __init__(self, sql_driver: SqlDriver):
+        self.sql_driver = sql_driver
+
+    def get_tool_definition(self) -> Tool:
+        return Tool(
+            name=self.name,
+            description=self.description,
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max tables to return",
+                        "default": 20, "minimum": 1, "maximum": 100,
+                    },
+                    "schema_name": {
+                        "type": "string",
+                        "description": "Filter to a specific schema (optional)",
+                    },
+                },
+                "required": []
+            },
+            annotations=self.get_annotations()
+        )
+
+    async def run_tool(self, arguments: dict[str, Any]) -> Sequence[TextContent]:
+        try:
+            limit = arguments.get("limit", 20)
+            schema_name = arguments.get("schema_name")
+
+            query = """
+                SELECT
+                    FILE_NAME,
+                    SUM_NUMBER_OF_BYTES_READ AS total_read_bytes,
+                    SUM_NUMBER_OF_BYTES_WRITE AS total_write_bytes,
+                    SUM_TIMER_READ AS total_read_timer,
+                    SUM_TIMER_WRITE AS total_write_timer,
+                    COUNT_READ AS read_count,
+                    COUNT_WRITE AS write_count
+                FROM performance_schema.file_summary_by_instance
+                WHERE EVENT_NAME = 'wait/io/file/innodb/innodb_data_file'
+                  AND SUM_NUMBER_OF_BYTES_READ + SUM_NUMBER_OF_BYTES_WRITE > 0
+            """
+            rows = await self.sql_driver.execute_query(query)
+
+            system_schemas = {"mysql", "information_schema", "performance_schema", "sys"}
+            # Aggregate per logical (schema, table). Partitioned tables produce
+            # one row per partition file (e.g. orders#p#p0.ibd, orders#p#p1.ibd);
+            # _parse_filename normalises those to the logical name "orders" and
+            # this dict sums the metrics so the hotspots list reports one row
+            # per logical table instead of one per partition file.
+            aggregated: dict[tuple[str, str], dict[str, int]] = {}
+            for r in rows:
+                schema, table = self._parse_filename(r["FILE_NAME"])
+                if not schema or not table:
+                    continue
+                if schema in system_schemas:
+                    continue
+                if schema_name and schema != schema_name:
+                    continue
+                key = (schema, table)
+                entry = aggregated.setdefault(key, {
+                    "total_read_bytes": 0,
+                    "total_write_bytes": 0,
+                    "total_read_timer": 0,
+                    "total_write_timer": 0,
+                    "read_count": 0,
+                    "write_count": 0,
+                })
+                entry["total_read_bytes"] += r["total_read_bytes"] or 0
+                entry["total_write_bytes"] += r["total_write_bytes"] or 0
+                entry["total_read_timer"] += r["total_read_timer"] or 0
+                entry["total_write_timer"] += r["total_write_timer"] or 0
+                entry["read_count"] += r["read_count"] or 0
+                entry["write_count"] += r["write_count"] or 0
+
+            tables: list[dict] = []
+            for (schema, table), m in aggregated.items():
+                # performance_schema timer values are in picoseconds
+                read_latency_sec = m["total_read_timer"] / 1e12
+                write_latency_sec = m["total_write_timer"] / 1e12
+                tables.append({
+                    "schema": schema,
+                    "table": table,
+                    "total_read_bytes": m["total_read_bytes"],
+                    "total_write_bytes": m["total_write_bytes"],
+                    "total_read_latency_sec": round(read_latency_sec, 4),
+                    "total_write_latency_sec": round(write_latency_sec, 4),
+                    "avg_read_latency_us": round(
+                        m["total_read_timer"] / max(m["read_count"], 1) / 1e6, 2
+                    ),
+                    "avg_write_latency_us": round(
+                        m["total_write_timer"] / max(m["write_count"], 1) / 1e6, 2
+                    ),
+                    "_total_latency": read_latency_sec + write_latency_sec,
+                })
+
+            tables.sort(key=lambda t: t["_total_latency"], reverse=True)
+            top = tables[:limit]
+            for t in top:
+                del t["_total_latency"]
+
+            total_latency_all = sum(
+                t["total_read_latency_sec"] + t["total_write_latency_sec"]
+                for t in top
+            )
+            top_pct = 0.0
+            if top and total_latency_all > 0:
+                first_total = top[0]["total_read_latency_sec"] + top[0]["total_write_latency_sec"]
+                top_pct = round(first_total / total_latency_all * 100, 2)
+
+            recommendations: list[str] = []
+            if top_pct > 50:
+                recommendations.append(
+                    f"Top table dominates I/O ({top_pct}% of measured latency); "
+                    "consider partitioning or splitting hot rows."
+                )
+            for t in top:
+                if t["avg_read_latency_us"] > 10000:
+                    recommendations.append(
+                        f"Investigate storage latency on {t['schema']}.{t['table']} "
+                        f"(avg read latency {t['avg_read_latency_us']}us)."
+                    )
+
+            output = {
+                "tables": top,
+                "summary": {
+                    "table_count": len(top),
+                    "top_table_pct_of_total_io": top_pct,
+                },
+                "recommendations": recommendations,
+            }
+            return self.format_json_result(output)
+
+        except Exception as e:
+            return self.format_error(e)
+
+    @staticmethod
+    def _parse_filename(file_name: str) -> tuple[str, str]:
+        """Extract (schema, table) from a .ibd path.
+
+        Examples:
+            /var/lib/mysql/testdb/orders.ibd  ->  ("testdb", "orders")
+            ./testdb/orders.ibd               ->  ("testdb", "orders")
+        """
+        if not file_name:
+            return ("", "")
+        # Normalize separators (file_summary uses '/' even on Windows)
+        parts = file_name.replace("\\", "/").rstrip("/").split("/")
+        if len(parts) < 2:
+            return ("", "")
+        basename = parts[-1]
+        schema = parts[-2]
+        # Strip .ibd / .ibt extension
+        if "." in basename:
+            basename = basename.rsplit(".", 1)[0]
+        # Strip MySQL partition suffix (e.g. "orders#p#p1" or
+        # "orders#P#p0#SP#sp0") so per-partition I/O aggregates back to
+        # the logical table — otherwise top-N hotspots would report each
+        # partition as a separate "table".
+        table = basename.split("#")[0]
+        return (schema, table)

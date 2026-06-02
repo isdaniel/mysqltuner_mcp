@@ -1,0 +1,43 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mysql_image:
+          - "mysql:5.7"
+          - "mysql:8.0"
+          - "mysql:8.4"
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v4
+
+    - name: Set up Python 3.12
+      run: uv python install 3.12
+
+    - name: Install dependencies (dev + integration)
+      run: |
+        uv venv --python 3.12
+        uv pip install -e ".[dev,integration]"
+
+    - name: Pre-pull MySQL image
+      run: docker pull ${{ matrix.mysql_image }}
+
+    - name: Run integration tests
+      env:
+        MYSQL_TEST_IMAGE: ${{ matrix.mysql_image }}
+        TESTCONTAINERS_RYUK_DISABLED: "false"
+      run: uv run pytest tests/integration -v --tb=short
+      timeout-minutes: 10

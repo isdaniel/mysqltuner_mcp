@@ -29,12 +29,15 @@ from .tools_index import (
 )
 from .tools_performance import (
     AnalyzeQueryToolHandler,
+    CompareExplainPlansToolHandler,
     GetSlowQueriesToolHandler,
+    TableIoHotspotsToolHandler,
     TableStatsToolHandler,
 )
 from .tools_innodb import (
     InnoDBStatusToolHandler,
     InnoDBBufferPoolToolHandler,
+    InnoDBRedoLogPressureToolHandler,
     InnoDBTransactionsToolHandler,
 )
 from .tools_statements import (
@@ -44,6 +47,7 @@ from .tools_statements import (
     StatementsFullScansToolHandler,
     StatementErrorsToolHandler,
     LongQueryTypeCollationIssuesToolHandler,
+    TempTableSpillsInProgressToolHandler,
 )
 from .tools_memory import (
     MemoryCalculationsToolHandler,
@@ -67,6 +71,7 @@ from .tools_security import (
 )
 from .tools_diagnostic import (
     ConnectionAnalysisToolHandler,
+    LockWaitGraphToolHandler,
     TableLockAnalysisToolHandler,
     TempTableAnalysisToolHandler,
     PerfSchemaConfigToolHandler,
@@ -85,6 +90,8 @@ __all__ = [
     "GetSlowQueriesToolHandler",
     "AnalyzeQueryToolHandler",
     "TableStatsToolHandler",
+    "CompareExplainPlansToolHandler",
+    "TableIoHotspotsToolHandler",
     # Index
     "IndexRecommendationsToolHandler",
     "UnusedIndexesToolHandler",
@@ -98,6 +105,7 @@ __all__ = [
     "InnoDBStatusToolHandler",
     "InnoDBBufferPoolToolHandler",
     "InnoDBTransactionsToolHandler",
+    "InnoDBRedoLogPressureToolHandler",
     # Statement Analysis
     "StatementAnalysisToolHandler",
     "StatementsTempTablesToolHandler",
@@ -105,6 +113,7 @@ __all__ = [
     "StatementsFullScansToolHandler",
     "StatementErrorsToolHandler",
     "LongQueryTypeCollationIssuesToolHandler",
+    "TempTableSpillsInProgressToolHandler",
     # Memory
     "MemoryCalculationsToolHandler",
     "MemoryByHostToolHandler",
@@ -127,6 +136,7 @@ __all__ = [
     "TempTableAnalysisToolHandler",
     "PerfSchemaConfigToolHandler",
     "OptimizerConfigToolHandler",
+    "LockWaitGraphToolHandler",
     # Schema & Binlog
     "SchemaProfilingToolHandler",
     "BinlogAnalysisToolHandler",

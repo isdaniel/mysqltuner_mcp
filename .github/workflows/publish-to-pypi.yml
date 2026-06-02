@@ -32,6 +32,14 @@ jobs:
     - name: Run tests
       run: uv run pytest tests/ -v --tb=short
 
+    - name: Bandit security scan (src)
+      run: uv run bandit -r src/ -ll
+      continue-on-error: true
+
+    - name: pip-audit dependency vulnerability scan
+      run: uv run pip-audit --strict
+      continue-on-error: true
+
   build-and-publish:
     needs: build-test
     runs-on: ubuntu-latest

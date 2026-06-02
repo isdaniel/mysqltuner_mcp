@@ -106,21 +106,17 @@ class ToolHandler(ABC):
 
     def format_error(self, error: Exception) -> Sequence[TextContent]:
         """
-        Format an error as TextContent.
+        Format an error as TextContent using the security sanitizer.
 
-        Args:
-            error: Exception to format
-
-        Returns:
-            Sequence containing error TextContent
+        Strips credentials / SQL fragments from the client-visible message
+        and includes a trace_id correlating to the full server-side log.
         """
+        from ..security import sanitize_error
+
         return [
             TextContent(
                 type="text",
-                text=json.dumps({
-                    "error": str(error),
-                    "type": type(error).__name__
-                }, indent=2)
+                text=json.dumps(sanitize_error(error), indent=2)
             )
         ]
 

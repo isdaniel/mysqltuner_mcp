@@ -15,8 +15,21 @@ from typing import Any
 
 from mcp.types import TextContent, Tool
 
+from ..security import quote_ident
 from ..services import SqlDriver
 from .toolhandler import ToolHandler
+
+
+def _safe_drop_index(index_name: str, table_name: str) -> str:
+    """Build a DROP INDEX suggestion using safe identifier quoting.
+
+    Falls back to a non-runnable comment if either name is not a valid
+    MySQL identifier — never returns a copy-pasteable malicious statement.
+    """
+    try:
+        return f"DROP INDEX {quote_ident(index_name)} ON {quote_ident(table_name)}"
+    except ValueError:
+        return f"-- skipped: invalid identifier index={index_name!r} table={table_name!r}"
 
 
 class IndexRecommendationsToolHandler(ToolHandler):
@@ -420,7 +433,7 @@ Based on information_schema and performance_schema statistics."""
                     "size_mb": round(size_mb, 2),
                     "read_count": row["read_count"],
                     "write_count": row["write_count"],
-                    "drop_statement": f"DROP INDEX `{row['INDEX_NAME']}` ON `{row['TABLE_NAME']}`"
+                    "drop_statement": _safe_drop_index(row["INDEX_NAME"], row["TABLE_NAME"])
                 }
                 output["unused_indexes"].append(idx_info)
 
@@ -437,12 +450,12 @@ Based on information_schema and performance_schema statistics."""
 
             for dup in output["duplicate_indexes"]:
                 output["recommendations"].append(
-                    f"DROP duplicate index: DROP INDEX `{dup['duplicate_index']}` ON `{dup['table']}`"
+                    f"DROP duplicate index: {_safe_drop_index(dup['duplicate_index'], dup['table'])}"
                 )
 
             for red in output["redundant_indexes"]:
                 output["recommendations"].append(
-                    f"Consider dropping redundant index: DROP INDEX `{red['redundant_index']}` ON `{red['table']}` (covered by {red['covering_index']})"
+                    f"Consider dropping redundant index: {_safe_drop_index(red['redundant_index'], red['table'])} (covered by {red['covering_index']!r})"
                 )
 
             # Summary
