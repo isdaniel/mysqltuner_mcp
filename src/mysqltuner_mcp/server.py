@@ -1339,7 +1339,12 @@ def create_streamable_http_app(
     starlette_app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,
-        allow_credentials=bool(allowed_origins),
+        # Starlette CORSMiddleware asserts at construction time that
+        # allow_credentials is False when "*" is in allow_origins. Avoid
+        # the startup AssertionError by disabling credentials whenever a
+        # wildcard is present (the safer default — the operator that
+        # configured "*" almost certainly didn't intend to expose cookies).
+        allow_credentials=bool(allowed_origins) and "*" not in allowed_origins,
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
         expose_headers=["mcp-session-id", "mcp-protocol-version"],

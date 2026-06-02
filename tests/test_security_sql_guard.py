@@ -100,7 +100,7 @@ class TestRejectsEmpty:
 
 
 class TestStringLiteralBypassRegression:
-    """Regression tests for the state-machine comment stripper.
+    r"""Regression tests for the state-machine comment stripper.
 
     Earlier regex-based stripper (`/\*.*?\*/`) was bypassable by hiding
     a comment-open inside a string literal, e.g.
@@ -146,3 +146,29 @@ class TestStringLiteralBypassRegression:
 
     def test_real_multi_statement_outside_strings_still_rejected(self):
         _bad("SELECT 1; SELECT 2", match="Only one statement")
+
+
+class TestNoBackslashEscapesBypassRegression:
+    r"""Regression tests for the backslash-escape parser-mismatch bypass.
+
+    When the MySQL server runs with NO_BACKSLASH_ESCAPES enabled, the
+    backslash is a literal character. A payload like
+        SELECT 'abc\'; DROP TABLE users; --'
+    is parsed as TWO statements by the server. An earlier version of
+    the guard honoured \ as an in-string escape, saw the payload as
+    one statement, and let the smuggled DROP through.
+
+    The current state machine intentionally does NOT honour \ escapes;
+    only the mode-independent doubled-quote (`''`, `""`, `` `` ``)
+    escapes are recognized.
+    """
+
+    def test_backslash_quote_does_not_escape_in_single_quoted(self):
+        # Backslash before the closing quote must NOT extend the string;
+        # the DROP must be visible as a second statement.
+        q = "SELECT 'abc" + chr(92) + "'; DROP TABLE users; --'"
+        _bad(q, match="Only one statement")
+
+    def test_backslash_quote_does_not_escape_in_double_quoted(self):
+        q = 'SELECT "abc' + chr(92) + '"; DROP TABLE users; --"'
+        _bad(q, match="Only one statement")

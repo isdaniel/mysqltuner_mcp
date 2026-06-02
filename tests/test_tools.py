@@ -2990,3 +2990,86 @@ async def test_redo_log_pressure_capacity_zero_is_insufficient_data(monkeypatch)
     assert data["verdict"] == "insufficient_data"
     assert data["recommendation"] is None
     assert data["redo_log_capacity_bytes"] == 0
+
+
+@pytest.mark.asyncio
+async def test_compare_explain_plans_handles_lowercase_explain_column(mock_sql_driver):
+    """Regression: some drivers return the EXPLAIN column lowercase;
+    accessing res[0]['EXPLAIN'] would KeyError. Use a case-insensitive fallback.
+    """
+    from mysqltuner_mcp.tools.tools_performance import CompareExplainPlansToolHandler
+
+    plan = {"explain": json.dumps({  # NOTE: lowercase key
+        "query_block": {"table": {
+            "table_name": "users", "access_type": "ref",
+            "key": "PRIMARY", "rows_examined_per_scan": 1, "filtered": 100
+        }}
+    })}
+    mock_sql_driver.execute_query = AsyncMock(side_effect=[[plan], [plan]])
+
+    handler = CompareExplainPlansToolHandler(mock_sql_driver)
+    result = await handler.run_tool({
+        "query_a": "SELECT 1",
+        "query_b": "SELECT 1",
+    })
+    data = json.loads(result[0].text)
+    assert "error_type" not in data
+    assert data["verdict"] == "no significant difference"
+
+
+@pytest.mark.asyncio
+async def test_compare_explain_plans_ignores_trivial_row_difference(mock_sql_driver):
+    """Regression: a 1-vs-0 rows-examined difference must NOT be reported
+    as 'better' — apply both a 20% relative threshold AND a 10-row absolute floor.
+    """
+    from mysqltuner_mcp.tools.tools_performance import CompareExplainPlansToolHandler
+
+    plan_a = {"EXPLAIN": json.dumps({
+        "query_block": {"table": {
+            "table_name": "x", "access_type": "ref", "key": "PRIMARY",
+            "rows_examined_per_scan": 1, "filtered": 100
+        }}
+    })}
+    plan_b = {"EXPLAIN": json.dumps({
+        "query_block": {"table": {
+            "table_name": "x", "access_type": "ref", "key": "PRIMARY",
+            "rows_examined_per_scan": 0, "filtered": 100
+        }}
+    })}
+    mock_sql_driver.execute_query = AsyncMock(side_effect=[[plan_a], [plan_b]])
+
+    handler = CompareExplainPlansToolHandler(mock_sql_driver)
+    result = await handler.run_tool({
+        "query_a": "SELECT 1",
+        "query_b": "SELECT 1",
+    })
+    data = json.loads(result[0].text)
+    assert data["verdict"] == "no significant difference"
+
+
+@pytest.mark.asyncio
+async def test_compare_explain_plans_meaningful_row_difference_still_wins(mock_sql_driver):
+    """Sanity inverse: 1000 vs 100 rows examined IS significant; B should win."""
+    from mysqltuner_mcp.tools.tools_performance import CompareExplainPlansToolHandler
+
+    plan_a = {"EXPLAIN": json.dumps({
+        "query_block": {"table": {
+            "table_name": "x", "access_type": "ref", "key": "k1",
+            "rows_examined_per_scan": 1000, "filtered": 100
+        }}
+    })}
+    plan_b = {"EXPLAIN": json.dumps({
+        "query_block": {"table": {
+            "table_name": "x", "access_type": "ref", "key": "k2",
+            "rows_examined_per_scan": 100, "filtered": 100
+        }}
+    })}
+    mock_sql_driver.execute_query = AsyncMock(side_effect=[[plan_a], [plan_b]])
+
+    handler = CompareExplainPlansToolHandler(mock_sql_driver)
+    result = await handler.run_tool({
+        "query_a": "SELECT 1",
+        "query_b": "SELECT 1",
+    })
+    data = json.loads(result[0].text)
+    assert data["verdict"] == "B is better"

@@ -123,20 +123,23 @@ def _tokenize_and_split(query: str) -> list[str]:
             i += 1
             continue
 
-        # String literals — copy verbatim, skipping comment/split logic inside
+        # String literals — copy verbatim, skipping comment/split logic inside.
+        #
+        # We intentionally do NOT honour backslash escapes (\\' / \\"). When the
+        # MySQL server runs with NO_BACKSLASH_ESCAPES enabled, backslashes are
+        # literal characters and a payload like `SELECT 'abc\\'; DROP TABLE x; --'`
+        # is parsed as two statements server-side. If we treat \\' as an in-string
+        # escape, our guard would see ONE statement and let the smuggled DROP
+        # through. Sticking to doubled-quote escapes (`''`, `""`, ` `` `) is
+        # mode-independent and safe in both NO_BACKSLASH_ESCAPES on/off; the cost
+        # is that strings containing literal `\'` are over-conservatively split,
+        # which can only false-reject valid queries (never false-accept).
         if ch in ("'", '"', "`"):
             quote = ch
             buf.append(ch)
             i += 1
             while i < n:
                 c = query[i]
-                # Backslash escape (MySQL with NO_BACKSLASH_ESCAPES off — the
-                # default; we err on the safe side and treat \X as escape)
-                if c == "\\" and i + 1 < n:
-                    buf.append(c)
-                    buf.append(query[i + 1])
-                    i += 2
-                    continue
                 # Doubled-quote escape: '' inside ', "" inside ", `` inside `
                 if c == quote and i + 1 < n and query[i + 1] == quote:
                     buf.append(c)

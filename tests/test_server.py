@@ -457,3 +457,36 @@ def test_warn_if_public_bind_silent_on_loopback(caplog):
     caplog.set_level(logging.WARNING, logger="mysqltuner_mcp")
     _warn_if_public_bind("127.0.0.1")
     assert not any("public interface" in r.message for r in caplog.records)
+
+
+def test_create_streamable_http_app_with_wildcard_origin_does_not_crash():
+    """Regression: MCP_ALLOWED_ORIGINS='*' must NOT crash on startup.
+
+    Starlette's CORSMiddleware asserts that allow_credentials is False when
+    "*" is in allow_origins; an earlier version set allow_credentials to
+    bool(allowed_origins) which evaluated True with "*" and triggered the
+    assertion at app-construction time.
+    """
+    import os
+    from unittest.mock import patch
+    from mcp.server import Server
+    from mysqltuner_mcp.server import create_streamable_http_app
+
+    with patch.dict(os.environ, {"MCP_ALLOWED_ORIGINS": "*"}, clear=False):
+        # Must complete without raising AssertionError
+        app = create_streamable_http_app(Server("test"))
+        assert app is not None
+
+
+def test_create_streamable_http_app_with_explicit_origins_enables_credentials():
+    """Inverse: explicit non-wildcard origins keep credentials enabled."""
+    import os
+    from unittest.mock import patch
+    from mcp.server import Server
+    from mysqltuner_mcp.server import create_streamable_http_app
+
+    with patch.dict(os.environ,
+                    {"MCP_ALLOWED_ORIGINS": "https://example.com"},
+                    clear=False):
+        app = create_streamable_http_app(Server("test"))
+        assert app is not None

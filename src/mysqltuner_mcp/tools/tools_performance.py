@@ -730,8 +730,17 @@ Verdict heuristic (in order):
             res_b = await self.sql_driver.execute_query(f"EXPLAIN FORMAT=JSON {query_b}")
 
             import json as _json
-            plan_a = _json.loads(res_a[0]["EXPLAIN"]) if res_a else {}
-            plan_b = _json.loads(res_b[0]["EXPLAIN"]) if res_b else {}
+            # Some MySQL drivers / mock environments return the column name
+            # as "explain" instead of "EXPLAIN" — accept either to avoid a
+            # KeyError on otherwise valid results.
+            plan_a = (
+                _json.loads(res_a[0].get("EXPLAIN") or res_a[0].get("explain") or "{}")
+                if res_a else {}
+            )
+            plan_b = (
+                _json.loads(res_b[0].get("EXPLAIN") or res_b[0].get("explain") or "{}")
+                if res_b else {}
+            )
 
             tables_a = self._extract_tables(plan_a)
             tables_b = self._extract_tables(plan_b)
@@ -756,8 +765,14 @@ Verdict heuristic (in order):
                         f"{label_a} eliminates {full_scans_b - full_scans_a} full scan(s)"
                     )
             else:
-                threshold = 0.2 * max(rows_a, rows_b, 1)
-                if abs(rows_a - rows_b) >= threshold:
+                # Require BOTH a relative delta (>=20% of the larger side) AND
+                # an absolute floor — without the floor, trivial differences
+                # like 1 vs 0 rows examined would be reported as "better",
+                # which is noisy and misleading for tiny queries.
+                rel_threshold = 0.2 * max(rows_a, rows_b, 1)
+                abs_floor = 10
+                delta = abs(rows_a - rows_b)
+                if delta >= rel_threshold and delta >= abs_floor:
                     if rows_b < rows_a:
                         verdict = f"{label_b} is better"
                         rationale.append(
