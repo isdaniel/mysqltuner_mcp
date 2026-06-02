@@ -58,6 +58,8 @@ from .tools import (
     AnalyzeQueryToolHandler,
     GetSlowQueriesToolHandler,
     TableStatsToolHandler,
+    CompareExplainPlansToolHandler,
+    TableIoHotspotsToolHandler,
     # Index tools
     IndexRecommendationsToolHandler,
     IndexStatsToolHandler,
@@ -66,6 +68,7 @@ from .tools import (
     InnoDBStatusToolHandler,
     InnoDBBufferPoolToolHandler,
     InnoDBTransactionsToolHandler,
+    InnoDBRedoLogPressureToolHandler,
     # Statement analysis tools
     StatementAnalysisToolHandler,
     StatementsTempTablesToolHandler,
@@ -73,6 +76,7 @@ from .tools import (
     StatementsFullScansToolHandler,
     StatementErrorsToolHandler,
     LongQueryTypeCollationIssuesToolHandler,
+    TempTableSpillsInProgressToolHandler,
     # Memory tools
     MemoryCalculationsToolHandler,
     MemoryByHostToolHandler,
@@ -95,6 +99,7 @@ from .tools import (
     TempTableAnalysisToolHandler,
     PerfSchemaConfigToolHandler,
     OptimizerConfigToolHandler,
+    LockWaitGraphToolHandler,
     # Schema & binlog tools
     SchemaProfilingToolHandler,
     BinlogAnalysisToolHandler,
@@ -164,7 +169,10 @@ class ServerConfig:
             ssl_cert=os.getenv("MYSQL_SSL_CERT"),
             ssl_key=os.getenv("MYSQL_SSL_KEY"),
             ssl_verify_cert=get_bool_env("MYSQL_SSL_VERIFY_CERT", default=True),
-            ssl_verify_identity=get_bool_env("MYSQL_SSL_VERIFY_IDENTITY"),
+            ssl_verify_identity=get_bool_env(
+                "MYSQL_SSL_VERIFY_IDENTITY",
+                default=get_bool_env("MYSQL_SSL"),
+            ),
         )
 
 
@@ -201,8 +209,11 @@ class MySQLTunerServer:
                 result = await handler.run_tool(args)
                 return list(result)
             except Exception as e:
-                logger.exception(f"Error executing tool {name}")
-                return [TextContent(type="text", text=f"Error: {e!s}")]
+                from .security import sanitize_error
+                import json as _json
+                payload = sanitize_error(e)
+                logger.exception(f"Error executing tool {name} trace_id={payload['trace_id']}")
+                return [TextContent(type="text", text=_json.dumps(payload, indent=2))]
 
         @self.server.list_prompts()
         async def list_prompts() -> list[Prompt]:
@@ -335,6 +346,8 @@ class MySQLTunerServer:
             GetSlowQueriesToolHandler,
             AnalyzeQueryToolHandler,
             TableStatsToolHandler,
+            CompareExplainPlansToolHandler,
+            TableIoHotspotsToolHandler,
             # Index tools
             IndexRecommendationsToolHandler,
             UnusedIndexesToolHandler,
@@ -348,6 +361,7 @@ class MySQLTunerServer:
             InnoDBStatusToolHandler,
             InnoDBBufferPoolToolHandler,
             InnoDBTransactionsToolHandler,
+            InnoDBRedoLogPressureToolHandler,
             # Statement analysis tools
             StatementAnalysisToolHandler,
             StatementsTempTablesToolHandler,
@@ -355,6 +369,7 @@ class MySQLTunerServer:
             StatementsFullScansToolHandler,
             StatementErrorsToolHandler,
             LongQueryTypeCollationIssuesToolHandler,
+            TempTableSpillsInProgressToolHandler,
             # Memory calculation tools
             MemoryCalculationsToolHandler,
             MemoryByHostToolHandler,
@@ -377,6 +392,7 @@ class MySQLTunerServer:
             TempTableAnalysisToolHandler,
             PerfSchemaConfigToolHandler,
             OptimizerConfigToolHandler,
+            LockWaitGraphToolHandler,
             # Schema & binlog tools
             SchemaProfilingToolHandler,
             BinlogAnalysisToolHandler,
@@ -1313,16 +1329,31 @@ def create_streamable_http_app(
         lifespan=lifespan,
     )
 
-    # Add CORS middleware
+    # Add CORS middleware. Wildcard origin + allow_credentials is
+    # spec-invalid and unsafe; require an explicit allowlist via
+    # MCP_ALLOWED_ORIGINS (comma-separated). When unset, the server
+    # responds without an Access-Control-Allow-Origin header,
+    # effectively same-origin only.
+    raw_origins = os.environ.get("MCP_ALLOWED_ORIGINS", "").strip()
+    allowed_origins = [o.strip() for o in raw_origins.split(",") if o.strip()]
     starlette_app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
+        allow_origins=allowed_origins,
+        # Starlette CORSMiddleware asserts at construction time that
+        # allow_credentials is False when "*" is in allow_origins. Avoid
+        # the startup AssertionError by disabling credentials whenever a
+        # wildcard is present (the safer default — the operator that
+        # configured "*" almost certainly didn't intend to expose cookies).
+        allow_credentials=bool(allowed_origins) and "*" not in allowed_origins,
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
         expose_headers=["mcp-session-id", "mcp-protocol-version"],
         max_age=86400,
     )
+    if not allowed_origins:
+        logger.warning(
+            "MCP_ALLOWED_ORIGINS is empty; cross-origin requests will be denied."
+        )
 
     return starlette_app
 
@@ -1358,6 +1389,7 @@ async def run_server(
             )
 
     elif mode == "sse":
+        _warn_if_public_bind(host)
         if not HTTP_AVAILABLE:
             raise RuntimeError(
                 "SSE mode requires additional dependencies. "
@@ -1383,6 +1415,7 @@ async def run_server(
         await server.serve()
 
     elif mode == "streamable-http":
+        _warn_if_public_bind(host)
         if not HTTP_AVAILABLE:
             raise RuntimeError(
                 "Streamable HTTP mode requires additional dependencies. "
@@ -1480,6 +1513,17 @@ async def main() -> None:
     finally:
         if 'mysql_server' in locals():
             await mysql_server.shutdown()
+
+
+def _warn_if_public_bind(host: str) -> None:
+    """Warn when the resolved host is reachable from outside loopback."""
+    loopback = {"127.0.0.1", "::1", "localhost"}
+    if host not in loopback:
+        logger.warning(
+            "Binding to %s on a public interface without authentication. "
+            "Restrict via --host 127.0.0.1 or run behind a reverse proxy.",
+            host,
+        )
 
 
 def _configure_event_loop_policy() -> None:

@@ -17,8 +17,17 @@ from typing import Any
 
 from mcp.types import TextContent, Tool
 
+from ..security import quote_ident
 from ..services import SqlDriver
 from .toolhandler import ToolHandler
+
+
+def _safe_table_ref(schema: str, table: str) -> str:
+    """Quote schema.table or fall back to a non-runnable comment."""
+    try:
+        return f"{quote_ident(schema)}.{quote_ident(table)}"
+    except ValueError:
+        return f"-- skipped: invalid identifier schema={schema!r} table={table!r}"
 
 
 class StorageEngineAnalysisToolHandler(ToolHandler):
@@ -555,8 +564,7 @@ High fragmentation wastes disk space and can slow queries."""
                     "data_free_mb": round(data_free / 1024 / 1024, 2),
                     "fragmentation_pct": row.get("fragmentation_pct"),
                     "optimize_command": (
-                        f"OPTIMIZE TABLE `{row.get('TABLE_SCHEMA')}`."
-                        f"`{row.get('TABLE_NAME')}`"
+                        f"OPTIMIZE TABLE {_safe_table_ref(row.get('TABLE_SCHEMA') or '', row.get('TABLE_NAME') or '')}"
                     )
                 })
 
@@ -733,13 +741,13 @@ Based on MySQLTuner's auto-increment analysis."""
 
                 if "bigint" in data_type:
                     output["recommendations"].append(
-                        f"Table `{table['schema']}`.`{table['table']}` is at "
+                        f"Table {_safe_table_ref(table['schema'], table['table'])} is at "
                         f"{table['usage_pct']:.2f}% of BIGINT capacity. "
                         "Consider data archival strategy."
                     )
                 elif "unsigned" not in data_type:
                     output["recommendations"].append(
-                        f"Table `{table['schema']}`.`{table['table']}` "
+                        f"Table {_safe_table_ref(table['schema'], table['table'])} "
                         f"({table['column_type']}) is at {table['usage_pct']:.2f}% "
                         "capacity. Consider ALTER to UNSIGNED for 2x capacity or "
                         "upgrade to larger integer type."
@@ -755,7 +763,7 @@ Based on MySQLTuner's auto-increment analysis."""
                     suggested = next_type.get(base_type, "bigint")
 
                     output["recommendations"].append(
-                        f"Table `{table['schema']}`.`{table['table']}` "
+                        f"Table {_safe_table_ref(table['schema'], table['table'])} "
                         f"({table['column_type']}) is at {table['usage_pct']:.2f}% "
                         f"capacity. Consider upgrading to {suggested.upper()} UNSIGNED."
                     )

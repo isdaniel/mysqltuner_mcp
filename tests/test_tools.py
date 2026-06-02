@@ -2414,3 +2414,785 @@ class TestGlobalStatusSnapshotToolHandler:
         assert "Com_select" in parsed["counters"]
         # Should NOT include handler keys
         assert "Handler_read_key" not in parsed["counters"]
+
+
+def test_safe_drop_index_falls_back_on_malicious_name():
+    from mysqltuner_mcp.tools.tools_index import _safe_drop_index
+    out = _safe_drop_index("foo`; DROP TABLE x; --", "users")
+    assert out.startswith("-- skipped:")
+    assert "DROP TABLE x" in out  # echoed inside a comment, NOT executable
+    assert ";" not in out.split("--", 2)[0]  # nothing executable before the comment
+
+
+def test_safe_table_ref_falls_back_on_malicious_name():
+    from mysqltuner_mcp.tools.tools_engines import _safe_table_ref
+    out = _safe_table_ref("db", "users`; DROP TABLE x; --")
+    assert out.startswith("-- skipped:")
+
+
+
+@pytest.mark.asyncio
+async def test_analyze_query_rejects_multi_statement(mock_sql_driver):
+    handler = AnalyzeQueryToolHandler(mock_sql_driver)
+    result = await handler.run_tool({"query": "SELECT 1; DROP TABLE x"})
+    data = json.loads(result[0].text)
+    assert data["error_type"] == "SqlGuardError"
+    assert "Only one statement" in data["message"]
+
+
+@pytest.mark.asyncio
+async def test_analyze_query_rejects_comment_bypass(mock_sql_driver):
+    handler = AnalyzeQueryToolHandler(mock_sql_driver)
+    result = await handler.run_tool({"query": "SELECT 1 /*;*/; DROP TABLE x"})
+    data = json.loads(result[0].text)
+    assert data["error_type"] == "SqlGuardError"
+
+
+@pytest.mark.asyncio
+async def test_analyze_query_rejects_ddl(mock_sql_driver):
+    handler = AnalyzeQueryToolHandler(mock_sql_driver)
+    result = await handler.run_tool({"query": "CREATE TABLE evil (x INT)"})
+    data = json.loads(result[0].text)
+    assert data["error_type"] == "SqlGuardError"
+    assert "not permitted" in data["message"]
+
+
+@pytest.mark.asyncio
+async def test_analyze_query_explain_allows_update_without_confirm(mock_sql_driver):
+    """Plain EXPLAIN on UPDATE is allowed — EXPLAIN does not execute."""
+    mock_sql_driver.execute_query = AsyncMock(return_value=[])
+    handler = AnalyzeQueryToolHandler(mock_sql_driver)
+    result = await handler.run_tool({
+        "query": "UPDATE users SET x = 1",
+        "analyze": False,
+    })
+    data = json.loads(result[0].text)
+    assert "error_type" not in data
+    mock_sql_driver.execute_query.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_analyze_query_explain_analyze_update_requires_confirm(mock_sql_driver):
+    handler = AnalyzeQueryToolHandler(mock_sql_driver)
+    result = await handler.run_tool({
+        "query": "UPDATE users SET x = 1",
+        "analyze": True,
+        "confirm_write": False,
+    })
+    data = json.loads(result[0].text)
+    assert data["error_type"] == "SqlGuardError"
+    assert "confirm_write" in data["message"]
+
+
+@pytest.mark.asyncio
+async def test_analyze_lock_wait_graph_empty_when_no_waits(mock_sql_driver):
+    from mysqltuner_mcp.tools.tools_diagnostic import LockWaitGraphToolHandler
+    mock_sql_driver.execute_query = AsyncMock(return_value=[])
+    handler = LockWaitGraphToolHandler(mock_sql_driver)
+    result = await handler.run_tool({})
+    data = json.loads(result[0].text)
+    assert "error_type" not in data
+    assert data["roots"] == []
+    assert data["edges"] == []
+    assert data["cycles"] == []
+    assert data["summary"]["total_waiters"] == 0
+
+
+@pytest.mark.asyncio
+async def test_analyze_lock_wait_graph_linear_chain(mock_sql_driver):
+    from mysqltuner_mcp.tools.tools_diagnostic import LockWaitGraphToolHandler
+    mock_sql_driver.execute_query = AsyncMock(return_value=[
+        {"blocker_trx_id": "T1", "blocker_thread_id": 1, "waiter_trx_id": "T2",
+         "waiter_thread_id": 2, "lock_type": "RECORD", "table_name": "orders",
+         "wait_seconds": 5, "blocker_query": "UPDATE orders SET ...",
+         "waiter_query": "UPDATE orders WHERE id=1"},
+        {"blocker_trx_id": "T2", "blocker_thread_id": 2, "waiter_trx_id": "T3",
+         "waiter_thread_id": 3, "lock_type": "RECORD", "table_name": "orders",
+         "wait_seconds": 2, "blocker_query": "UPDATE orders WHERE id=1",
+         "waiter_query": "UPDATE orders WHERE id=2"},
+    ])
+    handler = LockWaitGraphToolHandler(mock_sql_driver)
+    result = await handler.run_tool({})
+    data = json.loads(result[0].text)
+    root_ids = {r["trx_id"] for r in data["roots"]}
+    assert root_ids == {"T1"}
+    assert len(data["edges"]) == 2
+    assert data["cycles"] == []
+    assert data["summary"]["longest_chain_depth"] == 3
+
+
+@pytest.mark.asyncio
+async def test_analyze_lock_wait_graph_detects_cycle(mock_sql_driver):
+    from mysqltuner_mcp.tools.tools_diagnostic import LockWaitGraphToolHandler
+    mock_sql_driver.execute_query = AsyncMock(return_value=[
+        {"blocker_trx_id": "T2", "blocker_thread_id": 2, "waiter_trx_id": "T1",
+         "waiter_thread_id": 1, "lock_type": "RECORD", "table_name": "users",
+         "wait_seconds": 1, "blocker_query": "q2", "waiter_query": "q1"},
+        {"blocker_trx_id": "T1", "blocker_thread_id": 1, "waiter_trx_id": "T2",
+         "waiter_thread_id": 2, "lock_type": "RECORD", "table_name": "users",
+         "wait_seconds": 1, "blocker_query": "q1", "waiter_query": "q2"},
+    ])
+    handler = LockWaitGraphToolHandler(mock_sql_driver)
+    result = await handler.run_tool({})
+    data = json.loads(result[0].text)
+    assert len(data["cycles"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_analyze_lock_wait_graph_8_0_only_error(mock_sql_driver):
+    import pymysql.err
+    from mysqltuner_mcp.tools.tools_diagnostic import LockWaitGraphToolHandler
+    mock_sql_driver.execute_query = AsyncMock(
+        side_effect=pymysql.err.ProgrammingError(
+            1146, "Table 'performance_schema.data_lock_waits' doesn't exist"
+        )
+    )
+    handler = LockWaitGraphToolHandler(mock_sql_driver)
+    result = await handler.run_tool({})
+    data = json.loads(result[0].text)
+    assert data["error_type"] == "ValueError"
+    assert "MySQL 8.0+" in data["message"]
+
+
+@pytest.mark.asyncio
+async def test_compare_explain_plans_missing_required_args(mock_sql_driver):
+    from mysqltuner_mcp.tools.tools_performance import CompareExplainPlansToolHandler
+    handler = CompareExplainPlansToolHandler(mock_sql_driver)
+    result = await handler.run_tool({"query_a": "SELECT 1"})  # missing query_b
+    data = json.loads(result[0].text)
+    assert data["error_type"] == "ValueError"
+    assert "query_b" in data["message"]
+
+
+@pytest.mark.asyncio
+async def test_compare_explain_plans_rejects_bad_query_a(mock_sql_driver):
+    from mysqltuner_mcp.tools.tools_performance import CompareExplainPlansToolHandler
+    handler = CompareExplainPlansToolHandler(mock_sql_driver)
+    result = await handler.run_tool({
+        "query_a": "DROP TABLE x",
+        "query_b": "SELECT 1",
+    })
+    data = json.loads(result[0].text)
+    assert data["error_type"] == "SqlGuardError"
+
+
+@pytest.mark.asyncio
+async def test_compare_explain_plans_rejects_bad_query_b(mock_sql_driver):
+    from mysqltuner_mcp.tools.tools_performance import CompareExplainPlansToolHandler
+    handler = CompareExplainPlansToolHandler(mock_sql_driver)
+    result = await handler.run_tool({
+        "query_a": "SELECT 1",
+        "query_b": "SELECT 1; DROP TABLE x",
+    })
+    data = json.loads(result[0].text)
+    assert data["error_type"] == "SqlGuardError"
+
+
+@pytest.mark.asyncio
+async def test_compare_explain_plans_detects_full_scan_change(mock_sql_driver):
+    from mysqltuner_mcp.tools.tools_performance import CompareExplainPlansToolHandler
+
+    plan_a = {"EXPLAIN": json.dumps({
+        "query_block": {"table": {
+            "table_name": "users", "access_type": "ALL",
+            "rows_examined_per_scan": 10000, "filtered": 10
+        }}
+    })}
+    plan_b = {"EXPLAIN": json.dumps({
+        "query_block": {"table": {
+            "table_name": "users", "access_type": "ref",
+            "key": "idx_email", "rows_examined_per_scan": 1, "filtered": 100
+        }}
+    })}
+    mock_sql_driver.execute_query = AsyncMock(side_effect=[[plan_a], [plan_b]])
+
+    handler = CompareExplainPlansToolHandler(mock_sql_driver)
+    result = await handler.run_tool({
+        "query_a": "SELECT * FROM users WHERE email = 'x'",
+        "query_b": "SELECT * FROM users WHERE email = 'x'",
+    })
+    data = json.loads(result[0].text)
+    assert "error_type" not in data
+    assert data["verdict"] == "B is better"
+    assert any("full scan" in r.lower() for r in data["rationale"])
+
+
+@pytest.mark.asyncio
+async def test_compare_explain_plans_no_significant_difference(mock_sql_driver):
+    from mysqltuner_mcp.tools.tools_performance import CompareExplainPlansToolHandler
+
+    plan = {"EXPLAIN": json.dumps({
+        "query_block": {"table": {
+            "table_name": "users", "access_type": "ref",
+            "key": "PRIMARY", "rows_examined_per_scan": 1, "filtered": 100
+        }}
+    })}
+    mock_sql_driver.execute_query = AsyncMock(side_effect=[[plan], [plan]])
+
+    handler = CompareExplainPlansToolHandler(mock_sql_driver)
+    result = await handler.run_tool({
+        "query_a": "SELECT * FROM users WHERE id = 1",
+        "query_b": "SELECT * FROM users WHERE id = 1",
+    })
+    data = json.loads(result[0].text)
+    assert data["verdict"] == "no significant difference"
+
+
+@pytest.mark.asyncio
+async def test_table_io_hotspots_returns_top_n_sorted(mock_sql_driver):
+    from mysqltuner_mcp.tools.tools_performance import TableIoHotspotsToolHandler
+    mock_sql_driver.execute_query = AsyncMock(return_value=[
+        {"FILE_NAME": "/var/lib/mysql/testdb/orders.ibd",
+         "total_read_bytes": 1000, "total_write_bytes": 2000,
+         "total_read_timer": 2e12, "total_write_timer": 4e12,
+         "read_count": 100, "write_count": 200},
+        {"FILE_NAME": "/var/lib/mysql/testdb/users.ibd",
+         "total_read_bytes": 100, "total_write_bytes": 200,
+         "total_read_timer": 1e11, "total_write_timer": 2e11,
+         "read_count": 10, "write_count": 20},
+    ])
+    handler = TableIoHotspotsToolHandler(mock_sql_driver)
+    result = await handler.run_tool({"limit": 5})
+    data = json.loads(result[0].text)
+    assert "error_type" not in data
+    assert data["tables"][0]["table"] == "orders"
+    assert data["tables"][1]["table"] == "users"
+
+
+@pytest.mark.asyncio
+async def test_table_io_hotspots_excludes_system_schemas(mock_sql_driver):
+    from mysqltuner_mcp.tools.tools_performance import TableIoHotspotsToolHandler
+    mock_sql_driver.execute_query = AsyncMock(return_value=[
+        {"FILE_NAME": "/var/lib/mysql/mysql/user.ibd",
+         "total_read_bytes": 1000, "total_write_bytes": 1000,
+         "total_read_timer": 1e12, "total_write_timer": 1e12,
+         "read_count": 1, "write_count": 1},
+    ])
+    handler = TableIoHotspotsToolHandler(mock_sql_driver)
+    result = await handler.run_tool({})
+    data = json.loads(result[0].text)
+    assert data["tables"] == []
+
+
+def test_table_io_hotspots_filename_parser():
+    from mysqltuner_mcp.tools.tools_performance import TableIoHotspotsToolHandler
+    assert TableIoHotspotsToolHandler._parse_filename(
+        "/var/lib/mysql/testdb/orders.ibd"
+    ) == ("testdb", "orders")
+    assert TableIoHotspotsToolHandler._parse_filename(
+        "./testdb/users.ibd"
+    ) == ("testdb", "users")
+    assert TableIoHotspotsToolHandler._parse_filename("") == ("", "")
+    assert TableIoHotspotsToolHandler._parse_filename("noslash.ibd") == ("", "")
+
+
+@pytest.mark.asyncio
+async def test_table_io_hotspots_empty(mock_sql_driver):
+    from mysqltuner_mcp.tools.tools_performance import TableIoHotspotsToolHandler
+    mock_sql_driver.execute_query = AsyncMock(return_value=[])
+    handler = TableIoHotspotsToolHandler(mock_sql_driver)
+    result = await handler.run_tool({})
+    data = json.loads(result[0].text)
+    assert "error_type" not in data
+    assert data["tables"] == []
+    assert data["summary"]["table_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_table_io_hotspots_recommends_when_top_dominates(mock_sql_driver):
+    from mysqltuner_mcp.tools.tools_performance import TableIoHotspotsToolHandler
+    # One huge table + small ones -> top dominates
+    mock_sql_driver.execute_query = AsyncMock(return_value=[
+        {"FILE_NAME": "/var/lib/mysql/testdb/big.ibd",
+         "total_read_bytes": 1, "total_write_bytes": 1,
+         "total_read_timer": 100e12, "total_write_timer": 100e12,
+         "read_count": 1, "write_count": 1},
+        {"FILE_NAME": "/var/lib/mysql/testdb/small.ibd",
+         "total_read_bytes": 1, "total_write_bytes": 1,
+         "total_read_timer": 1e9, "total_write_timer": 1e9,
+         "read_count": 1, "write_count": 1},
+    ])
+    handler = TableIoHotspotsToolHandler(mock_sql_driver)
+    result = await handler.run_tool({})
+    data = json.loads(result[0].text)
+    assert any("Top table dominates" in r for r in data["recommendations"])
+
+
+@pytest.mark.asyncio
+async def test_redo_log_pressure_uses_redo_log_capacity_when_present(monkeypatch):
+    """8.0.30+ path: innodb_redo_log_capacity is the source of truth."""
+    from unittest.mock import AsyncMock
+    from mysqltuner_mcp.tools.tools_innodb import InnoDBRedoLogPressureToolHandler
+
+    driver = AsyncMock()
+    driver.get_server_variables = AsyncMock(side_effect=[
+        {"innodb_redo_log_capacity": "2147483648"},  # capacity (2 GB)
+    ])
+    # Two INNODB_METRICS samples
+    driver.execute_query = AsyncMock(side_effect=[
+        [{"NAME": "log_lsn_current", "COUNT": 1000, "STATUS": "enabled"},
+         {"NAME": "log_lsn_checkpoint_age", "COUNT": 100, "STATUS": "enabled"}],
+        [{"NAME": "log_lsn_current", "COUNT": 1000000, "STATUS": "enabled"},
+         {"NAME": "log_lsn_checkpoint_age", "COUNT": 100, "STATUS": "enabled"}],
+    ])
+
+    # Skip the real 2-second sleep
+    async def fake_sleep(_):
+        return
+    import asyncio
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    handler = InnoDBRedoLogPressureToolHandler(driver)
+    result = await handler.run_tool({})
+    data = json.loads(result[0].text)
+    assert "error_type" not in data
+    assert data["redo_log_capacity_bytes"] == 2147483648
+    assert data["lsn_write_rate_bytes_per_sec"] > 0
+
+
+@pytest.mark.asyncio
+async def test_redo_log_pressure_falls_back_to_legacy_vars(monkeypatch):
+    """5.7 / pre-8.0.30 path: innodb_log_file_size * innodb_log_files_in_group."""
+    from unittest.mock import AsyncMock
+    from mysqltuner_mcp.tools.tools_innodb import InnoDBRedoLogPressureToolHandler
+
+    driver = AsyncMock()
+    driver.get_server_variables = AsyncMock(side_effect=[
+        # innodb_redo_log_capacity not present or 0
+        {},
+        {"innodb_log_files_in_group": "2", "innodb_log_file_size": "536870912"},
+    ])
+    driver.execute_query = AsyncMock(side_effect=[
+        [{"NAME": "log_lsn_current", "COUNT": 0, "STATUS": "enabled"},
+         {"NAME": "log_lsn_checkpoint_age", "COUNT": 0, "STATUS": "enabled"}],
+        [{"NAME": "log_lsn_current", "COUNT": 1000, "STATUS": "enabled"},
+         {"NAME": "log_lsn_checkpoint_age", "COUNT": 0, "STATUS": "enabled"}],
+    ])
+
+    async def fake_sleep(_):
+        return
+    import asyncio
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    handler = InnoDBRedoLogPressureToolHandler(driver)
+    result = await handler.run_tool({})
+    data = json.loads(result[0].text)
+    assert data["redo_log_capacity_bytes"] == 2 * 536870912
+
+
+@pytest.mark.asyncio
+async def test_redo_log_pressure_undersized_on_high_checkpoint_pct(monkeypatch):
+    from unittest.mock import AsyncMock
+    from mysqltuner_mcp.tools.tools_innodb import InnoDBRedoLogPressureToolHandler
+
+    driver = AsyncMock()
+    driver.get_server_variables = AsyncMock(return_value={"innodb_redo_log_capacity": "100"})
+    # checkpoint age 80% of 100
+    driver.execute_query = AsyncMock(side_effect=[
+        [{"NAME": "log_lsn_current", "COUNT": 1000, "STATUS": "enabled"},
+         {"NAME": "log_lsn_checkpoint_age", "COUNT": 80, "STATUS": "enabled"}],
+        [{"NAME": "log_lsn_current", "COUNT": 1000, "STATUS": "enabled"},
+         {"NAME": "log_lsn_checkpoint_age", "COUNT": 80, "STATUS": "enabled"}],
+    ])
+
+    async def fake_sleep(_):
+        return
+    import asyncio
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    handler = InnoDBRedoLogPressureToolHandler(driver)
+    result = await handler.run_tool({})
+    data = json.loads(result[0].text)
+    assert data["verdict"] == "undersized"
+
+
+@pytest.mark.asyncio
+async def test_redo_log_pressure_healthy(monkeypatch):
+    from unittest.mock import AsyncMock
+    from mysqltuner_mcp.tools.tools_innodb import InnoDBRedoLogPressureToolHandler
+
+    driver = AsyncMock()
+    driver.get_server_variables = AsyncMock(return_value={"innodb_redo_log_capacity": "2147483648"})
+    driver.execute_query = AsyncMock(side_effect=[
+        [{"NAME": "log_lsn_current", "COUNT": 100, "STATUS": "enabled"},
+         {"NAME": "log_lsn_checkpoint_age", "COUNT": 500000, "STATUS": "enabled"}],
+        [{"NAME": "log_lsn_current", "COUNT": 100, "STATUS": "enabled"},
+         {"NAME": "log_lsn_checkpoint_age", "COUNT": 500000, "STATUS": "enabled"}],
+    ])
+
+    async def fake_sleep(_):
+        return
+    import asyncio
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    handler = InnoDBRedoLogPressureToolHandler(driver)
+    result = await handler.run_tool({})
+    data = json.loads(result[0].text)
+    assert data["verdict"] == "healthy"
+
+
+@pytest.mark.asyncio
+async def test_redo_log_pressure_insufficient_data_when_metrics_disabled(monkeypatch):
+    from unittest.mock import AsyncMock
+    from mysqltuner_mcp.tools.tools_innodb import InnoDBRedoLogPressureToolHandler
+
+    driver = AsyncMock()
+    driver.get_server_variables = AsyncMock(return_value={"innodb_redo_log_capacity": "2147483648"})
+    driver.execute_query = AsyncMock(side_effect=[
+        [{"NAME": "log_lsn_current", "COUNT": 0, "STATUS": "disabled"}],
+        [{"NAME": "log_lsn_current", "COUNT": 0, "STATUS": "disabled"}],
+    ])
+
+    async def fake_sleep(_):
+        return
+    import asyncio
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    handler = InnoDBRedoLogPressureToolHandler(driver)
+    result = await handler.run_tool({})
+    data = json.loads(result[0].text)
+    assert data["verdict"] == "insufficient_data"
+    assert data["recommendation"] is None
+
+
+@pytest.mark.asyncio
+async def test_redo_log_pressure_lsn_sampling_uses_two_calls(monkeypatch):
+    from unittest.mock import AsyncMock
+    from mysqltuner_mcp.tools.tools_innodb import InnoDBRedoLogPressureToolHandler
+
+    driver = AsyncMock()
+    driver.get_server_variables = AsyncMock(return_value={"innodb_redo_log_capacity": "100"})
+    driver.execute_query = AsyncMock(side_effect=[
+        [{"NAME": "log_lsn_current", "COUNT": 0, "STATUS": "enabled"},
+         {"NAME": "log_lsn_checkpoint_age", "COUNT": 0, "STATUS": "enabled"}],
+        [{"NAME": "log_lsn_current", "COUNT": 100, "STATUS": "enabled"},
+         {"NAME": "log_lsn_checkpoint_age", "COUNT": 0, "STATUS": "enabled"}],
+    ])
+
+    async def fake_sleep(_):
+        return
+    import asyncio
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    handler = InnoDBRedoLogPressureToolHandler(driver)
+    await handler.run_tool({})
+    # Two INNODB_METRICS sample queries
+    assert driver.execute_query.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_temp_table_spills_empty_when_nothing_spilling(mock_sql_driver):
+    from mysqltuner_mcp.tools.tools_statements import TempTableSpillsInProgressToolHandler
+    mock_sql_driver.execute_query = AsyncMock(return_value=[])
+    handler = TempTableSpillsInProgressToolHandler(mock_sql_driver)
+    result = await handler.run_tool({})
+    data = json.loads(result[0].text)
+    assert "error_type" not in data
+    assert data["active_spills"] == []
+    assert data["summary"]["count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_temp_table_spills_lists_active_with_pct(mock_sql_driver):
+    from mysqltuner_mcp.tools.tools_statements import TempTableSpillsInProgressToolHandler
+    mock_sql_driver.execute_query = AsyncMock(return_value=[
+        {"THREAD_ID": 42, "SQL_TEXT": "SELECT * FROM orders ORDER BY total",
+         "EVENT_NAME": "stage/sql/Creating sort index",
+         "WORK_ESTIMATED": 1000, "WORK_COMPLETED": 250,
+         "TIMER_WAIT": 2_000_000_000_000},  # 2 sec in picoseconds
+    ])
+    handler = TempTableSpillsInProgressToolHandler(mock_sql_driver)
+    result = await handler.run_tool({})
+    data = json.loads(result[0].text)
+    assert len(data["active_spills"]) == 1
+    spill = data["active_spills"][0]
+    assert spill["thread_id"] == 42
+    assert spill["pct_complete"] == 25.0
+    assert spill["elapsed_sec"] == 2.0
+
+
+@pytest.mark.asyncio
+async def test_temp_table_spills_handles_zero_estimated(mock_sql_driver):
+    """WORK_ESTIMATED can be 0; pct must not divide by zero."""
+    from mysqltuner_mcp.tools.tools_statements import TempTableSpillsInProgressToolHandler
+    mock_sql_driver.execute_query = AsyncMock(return_value=[
+        {"THREAD_ID": 1, "SQL_TEXT": "SELECT 1",
+         "EVENT_NAME": "stage/sql/copy to tmp table",
+         "WORK_ESTIMATED": 0, "WORK_COMPLETED": 0,
+         "TIMER_WAIT": 0},
+    ])
+    handler = TempTableSpillsInProgressToolHandler(mock_sql_driver)
+    result = await handler.run_tool({})
+    data = json.loads(result[0].text)
+    assert data["active_spills"][0]["pct_complete"] is None
+
+
+@pytest.mark.asyncio
+async def test_analyze_lock_wait_graph_diamond_dag(mock_sql_driver):
+    """Regression: backtracking _chain_depth must report correct longest
+    chain when two paths converge at a common descendant.
+
+    Graph (T1 is root):
+        T1 -> T2 -> T4
+        T1 -> T3 -> T4
+
+    longest_chain_depth should be 3 (T1 -> T2 -> T4 or T1 -> T3 -> T4),
+    not 2 (which would happen if T4 were marked visited on the first
+    branch and skipped on the second).
+    """
+    from mysqltuner_mcp.tools.tools_diagnostic import LockWaitGraphToolHandler
+    mock_sql_driver.execute_query = AsyncMock(return_value=[
+        {"blocker_trx_id": "T1", "blocker_thread_id": 1, "waiter_trx_id": "T2",
+         "waiter_thread_id": 2, "lock_type": "RECORD", "table_name": "x",
+         "wait_seconds": 1, "blocker_query": "q1", "waiter_query": "q2"},
+        {"blocker_trx_id": "T1", "blocker_thread_id": 1, "waiter_trx_id": "T3",
+         "waiter_thread_id": 3, "lock_type": "RECORD", "table_name": "x",
+         "wait_seconds": 1, "blocker_query": "q1", "waiter_query": "q3"},
+        {"blocker_trx_id": "T2", "blocker_thread_id": 2, "waiter_trx_id": "T4",
+         "waiter_thread_id": 4, "lock_type": "RECORD", "table_name": "x",
+         "wait_seconds": 1, "blocker_query": "q2", "waiter_query": "q4"},
+        {"blocker_trx_id": "T3", "blocker_thread_id": 3, "waiter_trx_id": "T4",
+         "waiter_thread_id": 4, "lock_type": "RECORD", "table_name": "x",
+         "wait_seconds": 1, "blocker_query": "q3", "waiter_query": "q4"},
+    ])
+    handler = LockWaitGraphToolHandler(mock_sql_driver)
+    result = await handler.run_tool({})
+    data = json.loads(result[0].text)
+    assert data["summary"]["longest_chain_depth"] == 3
+
+
+@pytest.mark.asyncio
+async def test_redo_log_pressure_capacity_zero_is_insufficient_data(monkeypatch):
+    """Regression: capacity==0 must yield insufficient_data, not 'undersized'
+    with a 'recommendation = 0' bytes.
+    """
+    from unittest.mock import AsyncMock
+    from mysqltuner_mcp.tools.tools_innodb import InnoDBRedoLogPressureToolHandler
+
+    driver = AsyncMock()
+    # Neither innodb_redo_log_capacity nor legacy vars resolve -> capacity == 0
+    driver.get_server_variables = AsyncMock(side_effect=[{}, {}])
+    driver.execute_query = AsyncMock(side_effect=[
+        [{"NAME": "log_lsn_current", "COUNT": 0, "STATUS": "enabled"},
+         {"NAME": "log_lsn_checkpoint_age", "COUNT": 0, "STATUS": "enabled"}],
+        [{"NAME": "log_lsn_current", "COUNT": 0, "STATUS": "enabled"},
+         {"NAME": "log_lsn_checkpoint_age", "COUNT": 0, "STATUS": "enabled"}],
+    ])
+
+    async def fake_sleep(_):
+        return
+    import asyncio
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    handler = InnoDBRedoLogPressureToolHandler(driver)
+    result = await handler.run_tool({})
+    data = json.loads(result[0].text)
+    assert data["verdict"] == "insufficient_data"
+    assert data["recommendation"] is None
+    assert data["redo_log_capacity_bytes"] == 0
+
+
+@pytest.mark.asyncio
+async def test_compare_explain_plans_handles_lowercase_explain_column(mock_sql_driver):
+    """Regression: some drivers return the EXPLAIN column lowercase;
+    accessing res[0]['EXPLAIN'] would KeyError. Use a case-insensitive fallback.
+    """
+    from mysqltuner_mcp.tools.tools_performance import CompareExplainPlansToolHandler
+
+    plan = {"explain": json.dumps({  # NOTE: lowercase key
+        "query_block": {"table": {
+            "table_name": "users", "access_type": "ref",
+            "key": "PRIMARY", "rows_examined_per_scan": 1, "filtered": 100
+        }}
+    })}
+    mock_sql_driver.execute_query = AsyncMock(side_effect=[[plan], [plan]])
+
+    handler = CompareExplainPlansToolHandler(mock_sql_driver)
+    result = await handler.run_tool({
+        "query_a": "SELECT 1",
+        "query_b": "SELECT 1",
+    })
+    data = json.loads(result[0].text)
+    assert "error_type" not in data
+    assert data["verdict"] == "no significant difference"
+
+
+@pytest.mark.asyncio
+async def test_compare_explain_plans_ignores_trivial_row_difference(mock_sql_driver):
+    """Regression: a 1-vs-0 rows-examined difference must NOT be reported
+    as 'better' — apply both a 20% relative threshold AND a 10-row absolute floor.
+    """
+    from mysqltuner_mcp.tools.tools_performance import CompareExplainPlansToolHandler
+
+    plan_a = {"EXPLAIN": json.dumps({
+        "query_block": {"table": {
+            "table_name": "x", "access_type": "ref", "key": "PRIMARY",
+            "rows_examined_per_scan": 1, "filtered": 100
+        }}
+    })}
+    plan_b = {"EXPLAIN": json.dumps({
+        "query_block": {"table": {
+            "table_name": "x", "access_type": "ref", "key": "PRIMARY",
+            "rows_examined_per_scan": 0, "filtered": 100
+        }}
+    })}
+    mock_sql_driver.execute_query = AsyncMock(side_effect=[[plan_a], [plan_b]])
+
+    handler = CompareExplainPlansToolHandler(mock_sql_driver)
+    result = await handler.run_tool({
+        "query_a": "SELECT 1",
+        "query_b": "SELECT 1",
+    })
+    data = json.loads(result[0].text)
+    assert data["verdict"] == "no significant difference"
+
+
+@pytest.mark.asyncio
+async def test_compare_explain_plans_meaningful_row_difference_still_wins(mock_sql_driver):
+    """Sanity inverse: 1000 vs 100 rows examined IS significant; B should win."""
+    from mysqltuner_mcp.tools.tools_performance import CompareExplainPlansToolHandler
+
+    plan_a = {"EXPLAIN": json.dumps({
+        "query_block": {"table": {
+            "table_name": "x", "access_type": "ref", "key": "k1",
+            "rows_examined_per_scan": 1000, "filtered": 100
+        }}
+    })}
+    plan_b = {"EXPLAIN": json.dumps({
+        "query_block": {"table": {
+            "table_name": "x", "access_type": "ref", "key": "k2",
+            "rows_examined_per_scan": 100, "filtered": 100
+        }}
+    })}
+    mock_sql_driver.execute_query = AsyncMock(side_effect=[[plan_a], [plan_b]])
+
+    handler = CompareExplainPlansToolHandler(mock_sql_driver)
+    result = await handler.run_tool({
+        "query_a": "SELECT 1",
+        "query_b": "SELECT 1",
+    })
+    data = json.loads(result[0].text)
+    assert data["verdict"] == "B is better"
+
+
+def test_table_io_hotspots_strips_partition_suffix():
+    """Regression: MySQL partition files are named e.g. orders#p#p1.ibd;
+    the parser must return 'orders', not 'orders#p#p1', so per-partition
+    I/O aggregates back to the logical table.
+    """
+    from mysqltuner_mcp.tools.tools_performance import TableIoHotspotsToolHandler
+    # lowercase MySQL partition suffix
+    assert TableIoHotspotsToolHandler._parse_filename(
+        "/var/lib/mysql/testdb/orders#p#p1.ibd"
+    ) == ("testdb", "orders")
+    # uppercase suffix (older MySQL versions)
+    assert TableIoHotspotsToolHandler._parse_filename(
+        "/var/lib/mysql/testdb/orders#P#p0.ibd"
+    ) == ("testdb", "orders")
+    # subpartition
+    assert TableIoHotspotsToolHandler._parse_filename(
+        "/var/lib/mysql/testdb/orders#P#p0#SP#sp0.ibd"
+    ) == ("testdb", "orders")
+    # No partition suffix: existing behavior unchanged
+    assert TableIoHotspotsToolHandler._parse_filename(
+        "/var/lib/mysql/testdb/users.ibd"
+    ) == ("testdb", "users")
+
+
+@pytest.mark.asyncio
+async def test_table_io_hotspots_aggregates_partitions(mock_sql_driver):
+    """Regression: I/O from multiple partitions of the same table must be
+    aggregated into ONE entry — both the name normalized AND the metrics
+    summed — not just deduped to same name with separate rows.
+    """
+    from mysqltuner_mcp.tools.tools_performance import TableIoHotspotsToolHandler
+    mock_sql_driver.execute_query = AsyncMock(return_value=[
+        {"FILE_NAME": "/var/lib/mysql/testdb/orders#p#p1.ibd",
+         "total_read_bytes": 1000, "total_write_bytes": 1000,
+         "total_read_timer": 1e12, "total_write_timer": 1e12,
+         "read_count": 100, "write_count": 100},
+        {"FILE_NAME": "/var/lib/mysql/testdb/orders#p#p2.ibd",
+         "total_read_bytes": 2000, "total_write_bytes": 2000,
+         "total_read_timer": 2e12, "total_write_timer": 2e12,
+         "read_count": 200, "write_count": 200},
+    ])
+    handler = TableIoHotspotsToolHandler(mock_sql_driver)
+    result = await handler.run_tool({})
+    data = json.loads(result[0].text)
+    # Exactly ONE row for the logical "orders" table, not one-per-partition
+    assert len(data["tables"]) == 1, (
+        f"expected single aggregated row; got {len(data['tables'])}"
+    )
+    row = data["tables"][0]
+    assert row["table"] == "orders"
+    assert row["schema"] == "testdb"
+    # Metrics must be summed across partitions
+    assert row["total_read_bytes"] == 3000  # 1000 + 2000
+    assert row["total_write_bytes"] == 3000
+    assert row["total_read_latency_sec"] == 3.0  # (1e12 + 2e12) / 1e12
+    assert row["total_write_latency_sec"] == 3.0
+    # avg latency uses summed counts: 3e12 ps / 300 reads / 1e6 = 10000 us
+    assert row["avg_read_latency_us"] == 10000.0
+
+
+@pytest.mark.asyncio
+async def test_table_io_hotspots_keeps_distinct_tables_separate(mock_sql_driver):
+    """Sanity: aggregation must NOT collapse genuinely-distinct tables."""
+    from mysqltuner_mcp.tools.tools_performance import TableIoHotspotsToolHandler
+    mock_sql_driver.execute_query = AsyncMock(return_value=[
+        {"FILE_NAME": "/var/lib/mysql/testdb/orders.ibd",
+         "total_read_bytes": 1000, "total_write_bytes": 1000,
+         "total_read_timer": 1e12, "total_write_timer": 1e12,
+         "read_count": 100, "write_count": 100},
+        {"FILE_NAME": "/var/lib/mysql/testdb/users.ibd",
+         "total_read_bytes": 2000, "total_write_bytes": 2000,
+         "total_read_timer": 2e12, "total_write_timer": 2e12,
+         "read_count": 200, "write_count": 200},
+        # Same table NAME in a different schema must stay separate
+        {"FILE_NAME": "/var/lib/mysql/otherdb/orders.ibd",
+         "total_read_bytes": 500, "total_write_bytes": 500,
+         "total_read_timer": 5e11, "total_write_timer": 5e11,
+         "read_count": 50, "write_count": 50},
+    ])
+    handler = TableIoHotspotsToolHandler(mock_sql_driver)
+    result = await handler.run_tool({})
+    data = json.loads(result[0].text)
+    assert len(data["tables"]) == 3
+    by_key = {(t["schema"], t["table"]): t for t in data["tables"]}
+    assert ("testdb", "orders") in by_key
+    assert ("testdb", "users") in by_key
+    assert ("otherdb", "orders") in by_key
+
+
+@pytest.mark.asyncio
+async def test_analyze_lock_wait_graph_dedupes_duplicate_edges(mock_sql_driver):
+    """Regression: multiple lock-wait rows between the same blocker/waiter
+    pair must not inflate blocks_count or trigger redundant DFS.
+
+    Setup: T1 blocks T2 across THREE different lock waits on different
+    tables (a realistic scenario when one long transaction holds locks
+    on multiple rows another transaction needs). The structural graph
+    is still T1 -> T2, so blocks_count must be 1 (not 3).
+    """
+    from mysqltuner_mcp.tools.tools_diagnostic import LockWaitGraphToolHandler
+    mock_sql_driver.execute_query = AsyncMock(return_value=[
+        {"blocker_trx_id": "T1", "blocker_thread_id": 1, "waiter_trx_id": "T2",
+         "waiter_thread_id": 2, "lock_type": "RECORD", "table_name": "orders",
+         "wait_seconds": 1, "blocker_query": "q1", "waiter_query": "q2"},
+        {"blocker_trx_id": "T1", "blocker_thread_id": 1, "waiter_trx_id": "T2",
+         "waiter_thread_id": 2, "lock_type": "RECORD", "table_name": "users",
+         "wait_seconds": 1, "blocker_query": "q1", "waiter_query": "q2"},
+        {"blocker_trx_id": "T1", "blocker_thread_id": 1, "waiter_trx_id": "T2",
+         "waiter_thread_id": 2, "lock_type": "RECORD", "table_name": "products",
+         "wait_seconds": 1, "blocker_query": "q1", "waiter_query": "q2"},
+    ])
+    handler = LockWaitGraphToolHandler(mock_sql_driver)
+    result = await handler.run_tool({})
+    data = json.loads(result[0].text)
+    # The raw edges list preserves every wait event (3 total — per-wait detail)
+    assert len(data["edges"]) == 3
+    # But the structural graph has T1 -> T2 ONCE, so blocks_count is 1
+    roots_by_id = {r["trx_id"]: r for r in data["roots"]}
+    assert roots_by_id["T1"]["blocks_count"] == 1
+    # And longest_chain_depth is 2 (T1 -> T2), not double-counted
+    assert data["summary"]["longest_chain_depth"] == 2

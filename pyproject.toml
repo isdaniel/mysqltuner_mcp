@@ -26,6 +26,11 @@ dev = [
     "pytest-cov>=7.1.0",
     "black>=25.11.0",
     "ruff>=0.15.7",
+    "bandit>=1.7.10",
+    "pip-audit>=2.7.3",
+]
+integration = [
+    "testcontainers[mysql]>=4.7.0",
 ]
 
 [project.scripts]

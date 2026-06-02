@@ -156,18 +156,26 @@ class DbConnPool:
                 return default
             return urllib.parse.unquote(values[0])
 
+        ssl_enabled = get_bool_param("ssl") or get_bool_param("ssl_enabled")
+        # SECURE-BY-DEFAULT: when SSL is on and the user didn't explicitly
+        # ask, verify hostname matches the certificate CN/SAN.
+        identity_default = True if ssl_enabled else False
+        ssl_verify_identity = get_bool_param(
+            "ssl_verify_identity", default=identity_default
+        )
+
         config = {
             "host": parsed.hostname,
             "port": parsed.port or 3306,
             "user": parsed.username or "root",
             "password": urllib.parse.unquote(parsed.password) if parsed.password else "",
             "database": database,
-            "ssl_enabled": get_bool_param("ssl") or get_bool_param("ssl_enabled"),
+            "ssl_enabled": ssl_enabled,
             "ssl_ca": get_str_param("ssl_ca"),
             "ssl_cert": get_str_param("ssl_cert"),
             "ssl_key": get_str_param("ssl_key"),
             "ssl_verify_cert": get_bool_param("ssl_verify_cert", default=True),
-            "ssl_verify_identity": get_bool_param("ssl_verify_identity", default=False),
+            "ssl_verify_identity": ssl_verify_identity,
         }
         config.update(kwargs)
 

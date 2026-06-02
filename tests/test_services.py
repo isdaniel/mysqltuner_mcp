@@ -483,3 +483,10 @@ class TestSqlDriver:
 
         assert result["max_connections"] == "151"
         assert result["innodb_buffer_pool_size"] == "134217728"
+
+
+@pytest.mark.asyncio
+async def test_get_tables_rejects_malicious_database_name(mock_pool):
+    driver = SqlDriver(mock_pool)
+    with pytest.raises(ValueError, match="Invalid SQL identifier"):
+        await driver.get_tables("foo`; DROP TABLE x; --")

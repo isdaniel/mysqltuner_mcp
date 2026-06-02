@@ -288,7 +288,7 @@ class TestMySQLTunerServer:
             )
             assert server.db_pool is not None
             assert server.sql_driver is not None
-            assert len(server.tools) == 39  # All 39 tools registered
+            assert len(server.tools) == 44  # All 44 tools registered
 
     @pytest.mark.asyncio
     async def test_shutdown(self):
@@ -393,3 +393,100 @@ class TestMySQLTunerServer:
 
         assert result.completion is not None
         assert len(result.completion.values) == 0
+
+
+import json
+import pytest
+from unittest.mock import AsyncMock
+
+from mcp.types import TextContent
+
+
+@pytest.mark.asyncio
+async def test_call_tool_error_is_sanitized():
+    """A tool that raises an OperationalError must not leak the credentials
+    to the MCP client response — only a redacted message + trace_id."""
+    import pymysql.err
+    from mysqltuner_mcp.server import MySQLTunerServer, ServerConfig
+    from mysqltuner_mcp.tools.toolhandler import ToolHandler
+
+    cfg = ServerConfig(mysql_uri="mysql://u:p@h:3306/d")
+    srv = MySQLTunerServer(cfg)
+
+    class _Boom(ToolHandler):
+        name = "_boom"
+        title = "boom"
+        description = "boom"
+
+        def get_tool_definition(self):
+            from mcp.types import Tool
+            return Tool(name=self.name, description=self.description,
+                        inputSchema={"type": "object", "properties": {}})
+
+        async def run_tool(self, arguments):
+            raise pymysql.err.OperationalError(
+                "(1045, \"Access denied for user 'root'@'1.2.3.4'\")"
+            )
+
+    srv.tools["_boom"] = _Boom()
+
+    from mysqltuner_mcp.security import sanitize_error as _sanitize
+    try:
+        await srv.tools["_boom"].run_tool({})
+    except Exception as e:
+        payload = _sanitize(e)
+
+    assert payload["error_type"] == "OperationalError"
+    assert payload["message"] == "Database error (see server logs)"
+    assert "root" not in payload["message"]
+    assert "1.2.3.4" not in payload["message"]
+    assert len(payload["trace_id"]) == 8
+
+
+def test_warn_if_public_bind_warns_on_zero_zero_zero_zero(caplog):
+    import logging
+    from mysqltuner_mcp.server import _warn_if_public_bind
+    caplog.set_level(logging.WARNING, logger="mysqltuner_mcp")
+    _warn_if_public_bind("0.0.0.0")
+    assert any("public interface" in r.message for r in caplog.records)
+
+
+def test_warn_if_public_bind_silent_on_loopback(caplog):
+    import logging
+    from mysqltuner_mcp.server import _warn_if_public_bind
+    caplog.set_level(logging.WARNING, logger="mysqltuner_mcp")
+    _warn_if_public_bind("127.0.0.1")
+    assert not any("public interface" in r.message for r in caplog.records)
+
+
+def test_create_streamable_http_app_with_wildcard_origin_does_not_crash():
+    """Regression: MCP_ALLOWED_ORIGINS='*' must NOT crash on startup.
+
+    Starlette's CORSMiddleware asserts that allow_credentials is False when
+    "*" is in allow_origins; an earlier version set allow_credentials to
+    bool(allowed_origins) which evaluated True with "*" and triggered the
+    assertion at app-construction time.
+    """
+    import os
+    from unittest.mock import patch
+    from mcp.server import Server
+    from mysqltuner_mcp.server import create_streamable_http_app
+
+    with patch.dict(os.environ, {"MCP_ALLOWED_ORIGINS": "*"}, clear=False):
+        # Must complete without raising AssertionError
+        app = create_streamable_http_app(Server("test"))
+        assert app is not None
+
+
+def test_create_streamable_http_app_with_explicit_origins_enables_credentials():
+    """Inverse: explicit non-wildcard origins keep credentials enabled."""
+    import os
+    from unittest.mock import patch
+    from mcp.server import Server
+    from mysqltuner_mcp.server import create_streamable_http_app
+
+    with patch.dict(os.environ,
+                    {"MCP_ALLOWED_ORIGINS": "https://example.com"},
+                    clear=False):
+        app = create_streamable_http_app(Server("test"))
+        assert app is not None
