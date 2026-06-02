@@ -197,7 +197,8 @@ class SqlDriver:
             List of table names
         """
         if database:
-            query = f"SHOW TABLES FROM `{database}`"
+            from ..security import quote_ident
+            query = f"SHOW TABLES FROM {quote_ident(database)}"
         else:
             query = "SHOW TABLES"
 

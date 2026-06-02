@@ -892,3 +892,193 @@ Useful for:
 
         except Exception as e:
             return self.format_error(e)
+
+
+class LockWaitGraphToolHandler(ToolHandler):
+    """Tool handler for the InnoDB lock-wait dependency graph."""
+
+    name = "analyze_lock_wait_graph"
+    title = "Lock Wait Graph Analyzer"
+    read_only_hint = True
+    destructive_hint = False
+    idempotent_hint = True
+    open_world_hint = False
+    description = """Build the InnoDB lock-wait dependency graph and find the root blocker(s).
+
+Where the existing analyze_table_locks shows per-pair waits, this tool walks the chain:
+- roots: transactions that block others but wait for nobody
+- edges: every blocker -> waiter relationship
+- cycles: deadlock-imminent loops (Tarjan SCC detection)
+- summary: total_waiters, total_blockers, longest_chain_depth
+
+Requires MySQL 8.0+ (uses performance_schema.data_lock_waits).
+On older versions returns a clear ValueError message."""
+
+    def __init__(self, sql_driver: SqlDriver):
+        self.sql_driver = sql_driver
+
+    def get_tool_definition(self) -> Tool:
+        return Tool(
+            name=self.name,
+            description=self.description,
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "include_idle": {
+                        "type": "boolean",
+                        "description": "Include idle (sleeping) transactions in the graph",
+                        "default": False
+                    }
+                },
+                "required": []
+            },
+            annotations=self.get_annotations()
+        )
+
+    async def run_tool(self, arguments: dict[str, Any]) -> Sequence[TextContent]:
+        try:
+            include_idle = arguments.get("include_idle", False)
+
+            query = """
+                SELECT
+                    bt.trx_id AS blocker_trx_id,
+                    bt.trx_mysql_thread_id AS blocker_thread_id,
+                    bt.trx_query AS blocker_query,
+                    wt.trx_id AS waiter_trx_id,
+                    wt.trx_mysql_thread_id AS waiter_thread_id,
+                    wt.trx_query AS waiter_query,
+                    dl.LOCK_TYPE AS lock_type,
+                    CONCAT(dl.OBJECT_SCHEMA, '.', dl.OBJECT_NAME) AS table_name,
+                    TIMESTAMPDIFF(SECOND, wt.trx_wait_started, NOW()) AS wait_seconds
+                FROM performance_schema.data_lock_waits w
+                JOIN performance_schema.data_locks dl
+                    ON w.REQUESTING_ENGINE_LOCK_ID = dl.ENGINE_LOCK_ID
+                JOIN information_schema.innodb_trx bt
+                    ON bt.trx_id = w.BLOCKING_ENGINE_TRANSACTION_ID
+                JOIN information_schema.innodb_trx wt
+                    ON wt.trx_id = w.REQUESTING_ENGINE_TRANSACTION_ID
+            """
+            if not include_idle:
+                query += " WHERE bt.trx_state != 'IDLE'"
+
+            try:
+                rows = await self.sql_driver.execute_query(query)
+            except Exception as exc:
+                msg = str(exc)
+                if "1146" in msg or "data_lock_waits" in msg.lower() or "doesn't exist" in msg.lower():
+                    raise ValueError(
+                        "Requires MySQL 8.0+ (performance_schema.data_lock_waits not found)"
+                    ) from exc
+                raise
+
+            output = self._build_graph(rows)
+            return self.format_json_result(output)
+
+        except Exception as e:
+            return self.format_error(e)
+
+    def _build_graph(self, rows: list[dict]) -> dict:
+        edges = []
+        blockers_set: set[str] = set()
+        waiters_set: set[str] = set()
+        adj: dict[str, list[str]] = {}
+        meta: dict[str, dict] = {}
+
+        for r in rows:
+            blocker = str(r["blocker_trx_id"])
+            waiter = str(r["waiter_trx_id"])
+            blockers_set.add(blocker)
+            waiters_set.add(waiter)
+            adj.setdefault(blocker, []).append(waiter)
+            meta.setdefault(blocker, {
+                "trx_id": blocker,
+                "thread_id": r["blocker_thread_id"],
+                "query": r["blocker_query"],
+            })
+            meta.setdefault(waiter, {
+                "trx_id": waiter,
+                "thread_id": r["waiter_thread_id"],
+                "query": r["waiter_query"],
+            })
+            edges.append({
+                "blocker_trx_id": blocker,
+                "blocker_thread_id": r["blocker_thread_id"],
+                "waiter_trx_id": waiter,
+                "waiter_thread_id": r["waiter_thread_id"],
+                "lock_type": r["lock_type"],
+                "table_name": r["table_name"],
+                "wait_seconds": r["wait_seconds"],
+            })
+
+        root_ids = blockers_set - waiters_set
+        roots = []
+        longest_chain = 0
+        for rid in root_ids:
+            depth = self._chain_depth(rid, adj, set())
+            longest_chain = max(longest_chain, depth)
+            roots.append({
+                **meta[rid],
+                "blocks_count": len(adj.get(rid, [])),
+                "chain_depth": depth,
+            })
+
+        cycles = self._find_cycles(adj, blockers_set | waiters_set)
+
+        return {
+            "roots": roots,
+            "edges": edges,
+            "cycles": cycles,
+            "summary": {
+                "total_waiters": len(waiters_set),
+                "total_blockers": len(blockers_set),
+                "longest_chain_depth": longest_chain,
+            },
+        }
+
+    def _chain_depth(self, node: str, adj: dict[str, list[str]], visited: set[str]) -> int:
+        if node in visited:
+            return 0
+        visited.add(node)
+        children = adj.get(node, [])
+        if not children:
+            return 1
+        return 1 + max((self._chain_depth(c, adj, visited) for c in children), default=0)
+
+    def _find_cycles(self, adj: dict[str, list[str]], nodes: set[str]) -> list[list[str]]:
+        """Tarjan's strongly connected components; SCCs of size > 1 are cycles."""
+        index_counter = [0]
+        stack: list[str] = []
+        lowlinks: dict[str, int] = {}
+        index: dict[str, int] = {}
+        on_stack: dict[str, bool] = {}
+        result: list[list[str]] = []
+
+        def strongconnect(v: str) -> None:
+            index[v] = index_counter[0]
+            lowlinks[v] = index_counter[0]
+            index_counter[0] += 1
+            stack.append(v)
+            on_stack[v] = True
+
+            for w in adj.get(v, []):
+                if w not in index:
+                    strongconnect(w)
+                    lowlinks[v] = min(lowlinks[v], lowlinks[w])
+                elif on_stack.get(w):
+                    lowlinks[v] = min(lowlinks[v], index[w])
+
+            if lowlinks[v] == index[v]:
+                component: list[str] = []
+                while True:
+                    w = stack.pop()
+                    on_stack[w] = False
+                    component.append(w)
+                    if w == v:
+                        break
+                if len(component) > 1:
+                    result.append(component)
+
+        for v in nodes:
+            if v not in index:
+                strongconnect(v)
+        return result

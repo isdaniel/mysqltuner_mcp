@@ -222,6 +222,8 @@ Add to your MCP client configuration (e.g., Claude Desktop):
 | `get_slow_queries` | Retrieve slow queries from performance_schema with detailed statistics |
 | `analyze_query` | Get EXPLAIN plan and analysis for a query with optimization recommendations |
 | `get_table_stats` | Get table statistics including size, row counts, fragmentation, and indexes |
+| `compare_explain_plans` | Diff EXPLAIN plans for two query variants; returns verdict + rationale |
+| `get_table_io_hotspots` | Rank tables by I/O latency from `performance_schema.file_summary_by_instance` |
 
 ### Index Tools
 
@@ -255,6 +257,7 @@ Add to your MCP client configuration (e.g., Claude Desktop):
 | `get_innodb_status` | Parse and analyze SHOW ENGINE INNODB STATUS output |
 | `analyze_buffer_pool` | Detailed InnoDB buffer pool analysis by schema and table |
 | `analyze_innodb_transactions` | Analyze InnoDB transactions, lock waits, and deadlocks |
+| `analyze_innodb_redo_log_pressure` | Measure redo log fill rate and recommend `innodb_redo_log_capacity` |
 
 ### Memory Tools
 
@@ -289,6 +292,18 @@ Add to your MCP client configuration (e.g., Claude Desktop):
 | `get_statements_with_sorting` | Find statements with sorting operations and file sorts |
 | `get_statements_with_full_scans` | Find statements performing full table scans |
 | `get_statements_with_errors` | Find statements producing errors or warnings |
+| `find_temporary_table_spills_in_progress` | List queries spilling to disk RIGHT NOW (live, not historical) |
+
+### Diagnostic Tools
+
+| Tool | Description |
+|------|-------------|
+| `analyze_connections` | Connection state analysis (Sleep / Query / Locked breakdown, per-user, per-host) |
+| `analyze_table_locks` | Table lock contention analysis (metadata locks, lock waits) |
+| `analyze_temp_tables` | Temporary table and disk-spill historical analysis |
+| `check_perf_schema_config` | Verify performance_schema is enabled and configured |
+| `review_optimizer_config` | Review optimizer switches and cost model |
+| `analyze_lock_wait_graph` | Build the InnoDB lock-wait dependency graph; find root blocker(s) and detect cycles (MySQL 8.0+) |
 
 ## Available Prompts
 

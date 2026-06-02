@@ -1522,3 +1522,88 @@ Note: Results are heuristic and may not capture all query patterns.
         if not token:
             return ""
         return token.strip("`\"")
+
+
+class TempTableSpillsInProgressToolHandler(ToolHandler):
+    """Tool handler for in-flight temp-table / filesort spill detection."""
+
+    name = "find_temporary_table_spills_in_progress"
+    title = "In-Progress Temp Table Spills"
+    read_only_hint = True
+    destructive_hint = False
+    idempotent_hint = True
+    open_world_hint = False
+    description = """List currently-active queries that are spilling to disk RIGHT NOW.
+
+Reads performance_schema.events_stages_current joined to events_statements_current
+on THREAD_ID, filtered to stages whose EVENT_NAME contains 'temp', 'filesort',
+or 'sort_result'. System threads are excluded.
+
+Each row reports:
+- thread_id, sql_text (the originating query)
+- stage (the performance_schema stage name)
+- work_estimated, work_completed
+- pct_complete (None when WORK_ESTIMATED is 0)
+- elapsed_sec (TIMER_WAIT converted from picoseconds)
+
+Empty list is normal-state, not an error."""
+
+    def __init__(self, sql_driver: SqlDriver):
+        self.sql_driver = sql_driver
+
+    def get_tool_definition(self) -> Tool:
+        return Tool(
+            name=self.name,
+            description=self.description,
+            inputSchema={"type": "object", "properties": {}, "required": []},
+            annotations=self.get_annotations()
+        )
+
+    async def run_tool(self, arguments: dict[str, Any]) -> Sequence[TextContent]:
+        try:
+            query = """
+                SELECT
+                    st.THREAD_ID,
+                    stmt.SQL_TEXT,
+                    st.EVENT_NAME,
+                    st.WORK_ESTIMATED,
+                    st.WORK_COMPLETED,
+                    st.TIMER_WAIT
+                FROM performance_schema.events_stages_current st
+                JOIN performance_schema.events_statements_current stmt
+                    ON st.THREAD_ID = stmt.THREAD_ID
+                JOIN performance_schema.threads t
+                    ON st.THREAD_ID = t.THREAD_ID
+                WHERE t.PROCESSLIST_ID IS NOT NULL
+                  AND (
+                      st.EVENT_NAME LIKE '%temp%'
+                      OR st.EVENT_NAME LIKE '%filesort%'
+                      OR st.EVENT_NAME LIKE '%sort_result%'
+                  )
+            """
+            rows = await self.sql_driver.execute_query(query)
+
+            spills: list[dict] = []
+            for r in rows:
+                est = r.get("WORK_ESTIMATED") or 0
+                done = r.get("WORK_COMPLETED") or 0
+                pct = round(done / est * 100, 2) if est > 0 else None
+                timer = r.get("TIMER_WAIT") or 0
+                spills.append({
+                    "thread_id": r["THREAD_ID"],
+                    "sql_text": r.get("SQL_TEXT"),
+                    "stage": r["EVENT_NAME"],
+                    "work_estimated": est,
+                    "work_completed": done,
+                    "pct_complete": pct,
+                    "elapsed_sec": round(timer / 1e12, 4),
+                })
+
+            output = {
+                "active_spills": spills,
+                "summary": {"count": len(spills)},
+            }
+            return self.format_json_result(output)
+
+        except Exception as e:
+            return self.format_error(e)
