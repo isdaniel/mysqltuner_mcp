@@ -952,7 +952,24 @@ Verdicts: healthy / undersized / oversized / insufficient_data."""
             await asyncio.sleep(self.SAMPLE_WINDOW_SEC)
             sample2 = await self._sample_metrics()
 
-            if not sample1.get("enabled") or not sample2.get("enabled"):
+            if (
+                capacity == 0
+                or not sample1.get("enabled")
+                or not sample2.get("enabled")
+            ):
+                # capacity==0 means we couldn't resolve innodb_redo_log_capacity
+                # nor the legacy innodb_log_file_size pair — refuse to give a
+                # verdict (and certainly never recommend "= 0").
+                rationale: list[str] = []
+                if capacity == 0:
+                    rationale.append(
+                        "Could not resolve redo log capacity from "
+                        "innodb_redo_log_capacity or innodb_log_file_size"
+                    )
+                if not sample1.get("enabled") or not sample2.get("enabled"):
+                    rationale.append(
+                        "INNODB_METRICS not enabled for log_lsn_* counters"
+                    )
                 output = {
                     "redo_log_capacity_bytes": capacity,
                     "current_checkpoint_age_bytes": None,
@@ -960,7 +977,7 @@ Verdicts: healthy / undersized / oversized / insufficient_data."""
                     "lsn_write_rate_bytes_per_sec": None,
                     "estimated_time_to_full_cycle_sec": None,
                     "verdict": "insufficient_data",
-                    "rationale": ["INNODB_METRICS not enabled for log_lsn_* counters"],
+                    "rationale": rationale,
                     "recommendation": None,
                 }
                 return self.format_json_result(output)

@@ -97,3 +97,52 @@ class TestRejectsEmpty:
 
     def test_comment_only(self):
         _bad("/* just a comment */", match="empty")
+
+
+class TestStringLiteralBypassRegression:
+    """Regression tests for the state-machine comment stripper.
+
+    Earlier regex-based stripper (`/\*.*?\*/`) was bypassable by hiding
+    a comment-open inside a string literal, e.g.
+        SELECT '/*'; DROP TABLE x; /* */
+    The regex matched from the inside-string `/*` to the trailing `*/`,
+    erasing the DROP. The state machine respects string literals.
+    """
+
+    def test_block_open_in_single_quote_does_not_strip(self):
+        # The earlier stripper turned this into one statement; must now
+        # be detected as multi-statement.
+        _bad("SELECT '/*'; DROP TABLE users; /* */",
+             match="Only one statement")
+
+    def test_block_open_in_double_quote_does_not_strip(self):
+        _bad('SELECT "/*"; DROP TABLE users; /* */',
+             match="Only one statement")
+
+    def test_block_open_in_backtick_does_not_strip(self):
+        _bad("SELECT `/*`; DROP TABLE users; /* */",
+             match="Only one statement")
+
+    def test_line_comment_marker_in_string_does_not_split(self):
+        # `--` inside a string must not split the statement
+        _ok("SELECT 'foo -- bar'")
+
+    def test_hash_in_string_does_not_split(self):
+        _ok("SELECT 'foo # bar'")
+
+    def test_semicolon_in_string_does_not_split(self):
+        # `;` inside a string literal must NOT split
+        _ok("SELECT 'a;b;c' AS x")
+
+    def test_escaped_quote_in_string_does_not_terminate(self):
+        # `''` and `\'` are both single-quote escapes; the statement
+        # remains a single SELECT.
+        _ok("SELECT 'it''s fine'")
+        _ok("SELECT 'it\'s fine'")
+
+    def test_unterminated_block_comment_consumes_rest(self):
+        # Unterminated /* is a strong injection signal; reject outright.
+        _bad("SELECT 1 /* never closed", match="Unterminated")
+
+    def test_real_multi_statement_outside_strings_still_rejected(self):
+        _bad("SELECT 1; SELECT 2", match="Only one statement")

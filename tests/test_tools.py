@@ -2925,3 +2925,68 @@ async def test_temp_table_spills_handles_zero_estimated(mock_sql_driver):
     result = await handler.run_tool({})
     data = json.loads(result[0].text)
     assert data["active_spills"][0]["pct_complete"] is None
+
+
+@pytest.mark.asyncio
+async def test_analyze_lock_wait_graph_diamond_dag(mock_sql_driver):
+    """Regression: backtracking _chain_depth must report correct longest
+    chain when two paths converge at a common descendant.
+
+    Graph (T1 is root):
+        T1 -> T2 -> T4
+        T1 -> T3 -> T4
+
+    longest_chain_depth should be 3 (T1 -> T2 -> T4 or T1 -> T3 -> T4),
+    not 2 (which would happen if T4 were marked visited on the first
+    branch and skipped on the second).
+    """
+    from mysqltuner_mcp.tools.tools_diagnostic import LockWaitGraphToolHandler
+    mock_sql_driver.execute_query = AsyncMock(return_value=[
+        {"blocker_trx_id": "T1", "blocker_thread_id": 1, "waiter_trx_id": "T2",
+         "waiter_thread_id": 2, "lock_type": "RECORD", "table_name": "x",
+         "wait_seconds": 1, "blocker_query": "q1", "waiter_query": "q2"},
+        {"blocker_trx_id": "T1", "blocker_thread_id": 1, "waiter_trx_id": "T3",
+         "waiter_thread_id": 3, "lock_type": "RECORD", "table_name": "x",
+         "wait_seconds": 1, "blocker_query": "q1", "waiter_query": "q3"},
+        {"blocker_trx_id": "T2", "blocker_thread_id": 2, "waiter_trx_id": "T4",
+         "waiter_thread_id": 4, "lock_type": "RECORD", "table_name": "x",
+         "wait_seconds": 1, "blocker_query": "q2", "waiter_query": "q4"},
+        {"blocker_trx_id": "T3", "blocker_thread_id": 3, "waiter_trx_id": "T4",
+         "waiter_thread_id": 4, "lock_type": "RECORD", "table_name": "x",
+         "wait_seconds": 1, "blocker_query": "q3", "waiter_query": "q4"},
+    ])
+    handler = LockWaitGraphToolHandler(mock_sql_driver)
+    result = await handler.run_tool({})
+    data = json.loads(result[0].text)
+    assert data["summary"]["longest_chain_depth"] == 3
+
+
+@pytest.mark.asyncio
+async def test_redo_log_pressure_capacity_zero_is_insufficient_data(monkeypatch):
+    """Regression: capacity==0 must yield insufficient_data, not 'undersized'
+    with a 'recommendation = 0' bytes.
+    """
+    from unittest.mock import AsyncMock
+    from mysqltuner_mcp.tools.tools_innodb import InnoDBRedoLogPressureToolHandler
+
+    driver = AsyncMock()
+    # Neither innodb_redo_log_capacity nor legacy vars resolve -> capacity == 0
+    driver.get_server_variables = AsyncMock(side_effect=[{}, {}])
+    driver.execute_query = AsyncMock(side_effect=[
+        [{"NAME": "log_lsn_current", "COUNT": 0, "STATUS": "enabled"},
+         {"NAME": "log_lsn_checkpoint_age", "COUNT": 0, "STATUS": "enabled"}],
+        [{"NAME": "log_lsn_current", "COUNT": 0, "STATUS": "enabled"},
+         {"NAME": "log_lsn_checkpoint_age", "COUNT": 0, "STATUS": "enabled"}],
+    ])
+
+    async def fake_sleep(_):
+        return
+    import asyncio
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    handler = InnoDBRedoLogPressureToolHandler(driver)
+    result = await handler.run_tool({})
+    data = json.loads(result[0].text)
+    assert data["verdict"] == "insufficient_data"
+    assert data["recommendation"] is None
+    assert data["redo_log_capacity_bytes"] == 0

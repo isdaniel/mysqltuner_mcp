@@ -45,6 +45,7 @@ def sanitize_error(exc: BaseException) -> dict[str, str]:
     logger.error(
         "tool error trace_id=%s type=%s detail=%r",
         trace_id, error_type, str(exc),
+        exc_info=True,
     )
 
     return {

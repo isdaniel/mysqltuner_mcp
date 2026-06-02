@@ -6,7 +6,7 @@
 [![Docker Pulls](https://img.shields.io/docker/pulls/dog830228/mysqltuner_mcp)](https://hub.docker.com/r/dog830228/mysqltuner_mcp)
 
 <a href="https://glama.ai/mcp/servers/@isdaniel/MySQL-Performance-Tuner-Mcp">
-  <img width="380" height="200" src="https://glama.ai/mcp/servers/@isdaniel/MySQL-Performance-Tuner-Mcp/badge" />
+<img width="380" height="200" src="https://glama.ai/mcp/servers/@isdaniel/MySQL-Performance-Tuner-Mcp/badge" />
 </a>
 
 A Model Context Protocol (MCP) server for MySQL performance tuning and analysis.

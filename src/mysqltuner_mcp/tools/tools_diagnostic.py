@@ -1037,12 +1037,21 @@ On older versions returns a clear ValueError message."""
 
     def _chain_depth(self, node: str, adj: dict[str, list[str]], visited: set[str]) -> int:
         if node in visited:
-            return 0
+            return 0  # cycle guard for the current DFS path
         visited.add(node)
-        children = adj.get(node, [])
-        if not children:
-            return 1
-        return 1 + max((self._chain_depth(c, adj, visited) for c in children), default=0)
+        try:
+            children = adj.get(node, [])
+            if not children:
+                return 1
+            return 1 + max(
+                (self._chain_depth(c, adj, visited) for c in children),
+                default=0,
+            )
+        finally:
+            # Backtrack: only the current DFS path is "visited"; nodes
+            # reached via a sibling branch must still be re-explorable
+            # so diamond-shaped DAGs report the correct longest chain.
+            visited.discard(node)
 
     def _find_cycles(self, adj: dict[str, list[str]], nodes: set[str]) -> list[list[str]]:
         """Tarjan's strongly connected components; SCCs of size > 1 are cycles."""

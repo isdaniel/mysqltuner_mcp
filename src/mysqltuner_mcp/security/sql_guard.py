@@ -1,7 +1,9 @@
 """Guard for user-supplied SQL fed to analyze_query.
 
 Strategy:
-1. Strip block comments and line comments (-- and #).
+1. Tokenize the query with a state machine that respects MySQL string
+   literals (', ", `) so comment-strip and statement-split decisions
+   honour quoted content.
 2. Reject if more than one non-empty statement remains.
 3. Reject if leading verb is not in the allowlist.
 4. If statement is a write AND analyze=True AND confirm_write=False, reject.
@@ -13,6 +15,10 @@ Notes:
 - EXPLAIN itself does NOT execute the wrapped statement, even for writes.
 - EXPLAIN ANALYZE (MySQL 8.0.18+) DOES execute. That is the only path
   that requires confirm_write for write verbs.
+- The earlier regex-based stripper (``/\\*.*?\\*/`` + ``--[^\\n]*``) was
+  vulnerable to a string-literal bypass: e.g. `SELECT '/*'; DROP TABLE
+  users; /* */` would have its middle stripped. The state machine below
+  closes that gap.
 """
 
 from __future__ import annotations
@@ -24,9 +30,6 @@ ALLOWED_VERBS = frozenset({
 })
 WRITE_VERBS = frozenset({"INSERT", "UPDATE", "DELETE", "REPLACE"})
 
-_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
-_LINE_COMMENT_DASH = re.compile(r"--[^\n]*")
-_LINE_COMMENT_HASH = re.compile(r"#[^\n]*")
 _LEADING_VERB = re.compile(r"\A\s*([A-Za-z]+)")
 
 
@@ -34,22 +37,125 @@ class SqlGuardError(Exception):
     """Raised when a user-supplied SQL statement is not safe to pass to EXPLAIN."""
 
 
-def _strip_comments(query: str) -> str:
-    # Replace line comments with ';' so any statement-terminator hidden inside
-    # a comment still produces a boundary (defeats `SELECT 1 -- ;\nDROP ...`
-    # style bypasses). Block comments become a single space so adjacent
-    # tokens stay separated but no new boundary is introduced.
-    query = _BLOCK_COMMENT.sub(" ", query)
-    query = _LINE_COMMENT_DASH.sub(";", query)
-    query = _LINE_COMMENT_HASH.sub(";", query)
-    return query
+def _tokenize_and_split(query: str) -> list[str]:
+    """Strip comments + split on statement terminators in a single pass.
 
+    Respects MySQL string-literal quoting so that ``SELECT '/*'`` does
+    not falsely trigger comment stripping, and ``SELECT ';'`` does not
+    falsely trigger statement splitting.
 
-def _split_statements(query: str) -> list[str]:
-    # Split on ';' AFTER comment stripping; treat NUL as a statement separator
-    # too (defensive - some clients drop NUL-terminated buffers verbatim).
-    parts = re.split(r"[;\x00]", query)
-    return [p for p in (s.strip() for s in parts) if p]
+    Recognized quote styles (matching MySQL behaviour):
+      - single-quoted string ``'...'`` with `''` or `\\'` escapes
+      - double-quoted string ``"..."`` with `""` or `\\"` escapes
+      - backtick-quoted identifier `` `...` `` with `` `` `` escapes
+
+    Recognized comment styles:
+      - block ``/* ... */`` (NOT nested)
+      - line ``-- ...\\n`` (MySQL also requires whitespace after `--`,
+        but we accept any to stay conservative)
+      - line ``# ...\\n``
+
+    NUL (``\\x00``) is treated as a statement terminator defensively;
+    some MySQL clients drop NUL-terminated buffers verbatim and a query
+    containing ``\\x00`` should never be passed to EXPLAIN as one piece.
+
+    Comments are replaced with a single space so adjacent tokens stay
+    separated; semicolons inside comments do NOT split statements;
+    semicolons inside string literals do NOT split statements.
+
+    Returns the list of non-empty stripped statements.
+    """
+    statements: list[str] = []
+    buf: list[str] = []
+    i = 0
+    n = len(query)
+
+    while i < n:
+        ch = query[i]
+        nxt = query[i + 1] if i + 1 < n else ""
+
+        # Block comment
+        if ch == "/" and nxt == "*":
+            end = query.find("*/", i + 2)
+            if end == -1:
+                # Unterminated block comment is a strong signal of an
+                # injection attempt — reject the whole query.
+                raise SqlGuardError("Unterminated block comment")
+            buf.append(" ")
+            i = end + 2
+            continue
+
+        # Line comment '-- ...' — flush buffer as a completed statement
+        # (treating the comment as a synthetic terminator). Defeats
+        # `SELECT 1 -- ;\nDROP TABLE x` style smuggling: the DROP becomes
+        # a separate statement and the guard rejects multi-statement input.
+        if ch == "-" and nxt == "-":
+            end = query.find("\n", i + 2)
+            stmt = "".join(buf).strip()
+            if stmt:
+                statements.append(stmt)
+            buf = []
+            if end == -1:
+                i = n
+            else:
+                i = end + 1
+            continue
+
+        # Line comment '# ...' — same treatment as '-- ...'
+        if ch == "#":
+            end = query.find("\n", i + 1)
+            stmt = "".join(buf).strip()
+            if stmt:
+                statements.append(stmt)
+            buf = []
+            if end == -1:
+                i = n
+            else:
+                i = end + 1
+            continue
+
+        # Statement terminators
+        if ch == ";" or ch == "\x00":
+            stmt = "".join(buf).strip()
+            if stmt:
+                statements.append(stmt)
+            buf = []
+            i += 1
+            continue
+
+        # String literals — copy verbatim, skipping comment/split logic inside
+        if ch in ("'", '"', "`"):
+            quote = ch
+            buf.append(ch)
+            i += 1
+            while i < n:
+                c = query[i]
+                # Backslash escape (MySQL with NO_BACKSLASH_ESCAPES off — the
+                # default; we err on the safe side and treat \X as escape)
+                if c == "\\" and i + 1 < n:
+                    buf.append(c)
+                    buf.append(query[i + 1])
+                    i += 2
+                    continue
+                # Doubled-quote escape: '' inside ', "" inside ", `` inside `
+                if c == quote and i + 1 < n and query[i + 1] == quote:
+                    buf.append(c)
+                    buf.append(c)
+                    i += 2
+                    continue
+                buf.append(c)
+                i += 1
+                if c == quote:
+                    break
+            continue
+
+        buf.append(ch)
+        i += 1
+
+    tail = "".join(buf).strip()
+    if tail:
+        statements.append(tail)
+    return statements
 
 
 def assert_safe_explain_target(
@@ -66,8 +172,7 @@ def assert_safe_explain_target(
     if not isinstance(query, str):
         raise SqlGuardError("Query must be a string")
 
-    stripped = _strip_comments(query)
-    statements = _split_statements(stripped)
+    statements = _tokenize_and_split(query)
 
     if not statements:
         raise SqlGuardError("Query is empty after stripping comments")
